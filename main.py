@@ -8,8 +8,15 @@ import pandas as pd
 from groq import Groq
 import pdfplumber
 import matplotlib.pyplot as plt
-from pdf2image import convert_from_path
-import pytesseract
+
+
+try:
+    from pdf2image import convert_from_path
+    import pytesseract
+    OCR_DISPONIBLE = True
+except:
+    print("⚠️ OCR no disponible en este entorno")
+    OCR_DISPONIBLE = False
 
 app = FastAPI()
 
@@ -52,13 +59,15 @@ async def upload_file(file: UploadFile = File(...)):
         pass
 
     # 🔥 SI NO HAY TEXTO → OCR
-    if not texto.strip():
+    if not texto.strip() and OCR_DISPONIBLE:
         print("🚨 Usando OCR")
+        try:
+            images = convert_from_path("temp.pdf")
+            for img in images:
+                texto += pytesseract.image_to_string(img)
 
-        images = convert_from_path("temp.pdf")
-
-        for img in images:
-            texto += pytesseract.image_to_string(img)
+        except Exception as e:
+            print("⚠️ OCR falló:", e)
 
     print("📄 TEXTO FINAL:", texto[:500])
 

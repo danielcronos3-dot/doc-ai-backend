@@ -1,7 +1,8 @@
 fastapi
 uvicorn
-python-multipart
-PyPDF2
 pandas
-groq
 matplotlib
+pdfplumber
+groq
+python-multipart
+pydantic
