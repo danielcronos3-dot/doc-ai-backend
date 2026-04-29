@@ -11,6 +11,8 @@ import pandas as pd
 from groq import Groq
 import matplotlib.pyplot as plt
 
+textos = []
+ultimo_resumen = []
 app = FastAPI()
 
 # 🌐 CORS
@@ -32,8 +34,8 @@ ultimo_resumen = []
 # -----------------------------
 # 📥 DESCARGAR EXCEL
 # -----------------------------
-@app.get("/descargar-Dashboard")
-def descargar_Dashboard():
+@app.get("/descargar-excel")
+def descargar_excel():
     if not os.path.exists("reporte.xlsx"):
         return {"error": "Archivo no generado aún"}
 
@@ -197,7 +199,7 @@ Devuelve SOLO JSON válido:
 
         # 📁 EXCEL
         df = pd.DataFrame(limpia)
-        df.to_Dashboard("reporte.xlsx", index=False)
+        df.to_excel("reporte.xlsx", index=False)
 
         return {
             "data": limpia,
