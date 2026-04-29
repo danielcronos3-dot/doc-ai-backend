@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import os
 import shutil
 import uuid
@@ -8,6 +9,7 @@ import json
 import re
 import pandas as pd
 from groq import Groq
+import matplotlib.pyplot as plt
 
 app = FastAPI()
 
@@ -25,6 +27,48 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # 🧠 memoria
 textos = []
+ultimo_resumen = []
+
+# -----------------------------
+# 📥 DESCARGAR EXCEL
+# -----------------------------
+@app.get("/descargar-Dashboard")
+def descargar_Dashboard():
+    if not os.path.exists("reporte.xlsx"):
+        return {"error": "Archivo no generado aún"}
+
+    return FileResponse(
+        "reporte.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="reporte.xlsx"
+    )
+
+# -----------------------------
+# 📊 DESCARGAR DASHBOARD
+# -----------------------------
+@app.get("/descargar-dashboard")
+def descargar_dashboard():
+    global ultimo_resumen
+
+    if not ultimo_resumen:
+        return {"error": "No hay datos"}
+
+    clientes = [r["cliente"] for r in ultimo_resumen]
+    totales = [r["total"] for r in ultimo_resumen]
+
+    plt.figure(figsize=(8, 4))
+    plt.bar(clientes, totales)
+    plt.xticks(rotation=45)
+
+    path = "grafica.png"
+    plt.savefig(path, bbox_inches="tight")
+    plt.close()
+
+    return FileResponse(
+        path,
+        media_type="image/png",
+        filename="dashboard.png"
+    )
 
 # -----------------------------
 # 📄 UPLOAD
@@ -77,22 +121,14 @@ async def chat(pregunta: dict):
         respuesta = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {
-                    "role": "system",
-                    "content": "Responde preguntas usando el contenido del documento"
-                },
-                {
-                    "role": "user",
-                    "content": f"{contenido}\n\nPregunta: {query}"
-                }
+                {"role": "system", "content": "Responde usando el documento"},
+                {"role": "user", "content": f"{contenido}\n\nPregunta: {query}"}
             ]
         )
-        print("📩 PREGUNTA:", pregunta)
 
         return {
             "respuesta": respuesta.choices[0].message.content
         }
-        
 
     except Exception as e:
         print("❌ ERROR CHAT:", e)
@@ -103,7 +139,7 @@ async def chat(pregunta: dict):
 # -----------------------------
 @app.post("/analizar")
 async def analizar():
-    global textos
+    global textos, ultimo_resumen
 
     try:
         if not textos:
@@ -113,9 +149,7 @@ async def analizar():
 
         data = []
 
-        # -----------------------------
-        # 🤖 IA (segura)
-        # -----------------------------
+        # 🤖 IA
         try:
             respuesta = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
@@ -123,16 +157,9 @@ async def analizar():
                     {
                         "role": "system",
                         "content": """
-Extrae TODOS los registros del documento.
-
 Devuelve SOLO JSON válido:
 
-[
- {"cliente": "", "monto": 0, "fecha": ""}
-]
-
-Sin texto adicional.
-Nunca devuelvas explicación.
+[{"cliente": "", "monto": 0, "fecha": ""}]
 """
                     },
                     {"role": "user", "content": contenido}
@@ -140,141 +167,43 @@ Nunca devuelvas explicación.
             )
 
             texto = respuesta.choices[0].message.content.strip()
-            print("🧠 IA RAW:", texto)
-
             match = re.search(r"\[.*\]", texto, re.DOTALL)
 
             if match:
                 data = json.loads(match.group(0))
-            else:
-                data = []
 
         except Exception as e:
             print("⚠️ IA FALLÓ:", e)
-            data = []
 
-        # -----------------------------
         # 🧼 LIMPIEZA
-        # -----------------------------
-        data_limpia = []
-
+        limpia = []
         for item in data:
-            if not isinstance(item, dict):
-                continue
-
-            cliente = item.get("cliente") or "Desconocido"
-            monto = item.get("monto") or 0
-            fecha = item.get("fecha") or "N/A"
-
             try:
-                monto = float(monto)
+                limpia.append({
+                    "cliente": item.get("cliente", "Desconocido"),
+                    "monto": float(item.get("monto", 0)),
+                    "fecha": item.get("fecha", "N/A")
+                })
             except:
-                monto = 0
+                pass
 
-            data_limpia.append({
-                "cliente": cliente,
-                "monto": monto,
-                "fecha": fecha
-            })
-
-        # -----------------------------
-        # 🔥 FALLBACK SI IA FALLA
-        # -----------------------------
-        if not data_limpia:
-            lineas = contenido.split("\n")
-
-            for i, linea in enumerate(lineas):
-
-                match_monto = re.search(r'\$?\s?\d{4,}(?:,\d{3})*(?:\.\d+)?', linea)
-
-                if match_monto:
-                    valor = float(re.sub(r"[^\d.]", "", match_monto.group()))
-
-                    if 2000 <= valor <= 2035:
-                        continue
-
-                    cliente = "Desconocido"
-
-                    for j in range(max(0, i-3), i):
-                        posible = lineas[j].strip()
-                        if posible and not any(c.isdigit() for c in posible):
-                            cliente = posible
-                            break
-
-                    if cliente.lower() in ["monto", "fecha", "cliente"]:
-                        continue
-
-                    fecha = "N/A"
-                    match_fecha = re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', linea)
-
-                    if not match_fecha:
-                        for j in range(i, min(i+3, len(lineas))):
-                            match_fecha = re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', lineas[j])
-                            if match_fecha:
-                                break
-
-                    if match_fecha:
-                        fecha = match_fecha.group()
-                        print("📄 TEXTO EXTRAÍDO:", texto[:500])
-
-                    data_limpia.append({
-                        "cliente": cliente,
-                        "monto": valor,
-                        "fecha": fecha
-                    })
-
-        # -----------------------------
-        # 🔁 QUITAR DUPLICADOS
-        # -----------------------------
-        data_unica = []
-        vistos = set()
-
-        for item in data_limpia:
-            clave = (item["cliente"], item["monto"], item["fecha"])
-
-            if clave not in vistos:
-                vistos.add(clave)
-                data_unica.append(item)
-
-        # -----------------------------
         # 📊 AGRUPAR
-        # -----------------------------
         resumen = {}
+        for item in limpia:
+            resumen[item["cliente"]] = resumen.get(item["cliente"], 0) + item["monto"]
 
-        for item in data_unica:
-            cliente = item["cliente"]
-            monto = item["monto"]
+        resumen_lista = [{"cliente": k, "total": v} for k, v in resumen.items()]
+        ultimo_resumen = resumen_lista
 
-            if cliente not in resumen:
-                resumen[cliente] = 0
+        # 📁 EXCEL
+        df = pd.DataFrame(limpia)
+        df.to_Dashboard("reporte.xlsx", index=False)
 
-            resumen[cliente] += monto
-
-        resumen_lista = [
-            {"cliente": k, "total": v}
-            for k, v in resumen.items()
-        ]
-
-        # -----------------------------
-        # 📁 EXPORTAR EXCEL
-        # -----------------------------
-        try:
-            df = pd.DataFrame(data_unica)
-            df.to_excel("reporte.xlsx", index=False)
-        except Exception as e:
-            print("⚠️ ERROR EXCEL:", e)
-
-        # -----------------------------
-        # 🚀 RESPUESTA FINAL
-        # -----------------------------
         return {
-            "data": data_unica,
+            "data": limpia,
             "resumen": resumen_lista
         }
 
     except Exception as e:
         print("🔥 ERROR ANALISIS:", e)
-        return {
-            "data": [],
-            "resumen": []
-        }
+        return {"data": [], "resumen": []}
