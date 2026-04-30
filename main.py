@@ -119,7 +119,7 @@ async def analizar():
     start = time.time()
 
     try:
-        modo_test = True   # CAMBIA A True PARA DEBUG
+        modo_test = False  # CAMBIA A True PARA DEBUG
 
         data = []
 
