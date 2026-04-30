@@ -12,7 +12,7 @@ import pdfplumber
 import uuid
 from dotenv import load_dotenv
 load_dotenv()
-print("API KEY:", os.getenv("GROQ_API_KEY"))
+
 
 # =============================
 # 🔥 LOGGER PRO
@@ -219,8 +219,11 @@ async def analizar():
         # fallback final
         if not data:
             log(rid, "⚠️ DEMO")
-            data = [item for item in data
-                    if len(str(item.get("cliente", "")).strip()) >= 3]
+            data = [
+                {"cliente": "Carlos Pérez", "monto": 1200, "fecha": "2026-01-15"},
+                {"cliente": "Ana Gómez", "monto": 2500, "fecha": "2026-02-20"},
+                {"cliente": "Carlos Pérez", "monto": 800, "fecha": "2026-03-10"},
+            ]
 
         # resumen
         resumen = {}
