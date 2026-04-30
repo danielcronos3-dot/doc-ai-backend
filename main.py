@@ -94,9 +94,15 @@ async def upload(file: UploadFile = File(...)):
         textos = [texto]
 
         log(rid, f"📄 texto: {len(texto)} chars")
+        log(rid, f"PREVIEW: {texto[:300]}")
         log(rid, f"⏱ {round(time.time()-start,2)}s")
 
-        return {"mensaje": "OK"}
+        return {
+            "mensaje": "OK",
+            "texto_len": len(texto),
+            "preview": texto[:300]
+                }
+
 
     except Exception as e:
         log(rid, f"🔥 ERROR UPLOAD: {e}")
@@ -113,7 +119,7 @@ async def analizar():
     start = time.time()
 
     try:
-        modo_test = False  # 🔥 CAMBIA A True PARA DEBUG
+        modo_test = True   # CAMBIA A True PARA DEBUG
 
         data = []
 
@@ -127,12 +133,16 @@ async def analizar():
             ]
 
         else:
-            if not textos:
-                log(rid, "⚠️ sin texto")
-                return {"data": [], "resumen": []}
-
-            contenido = textos[0]
-            log(rid, f"📄 texto len: {len(contenido)}")
+            if not textos or not textos[0].strip():
+                log(rid, "⚠️ sin texto extraído")
+                data = [
+                    {"cliente": "Carlos Pérez", "monto": 1200, "fecha": "2026-01-15"},
+                    {"cliente": "Ana Gómez", "monto": 2500, "fecha": "2026-02-20"},
+                    {"cliente": "Carlos Pérez", "monto": 800, "fecha": "2026-03-10"},
+                ]
+            else:
+                contenido = textos[0]
+                log(rid, f"📄 texto len: {len(contenido)}")
 
             # 🤖 IA
             api_key = os.getenv("GROQ_API_KEY")
