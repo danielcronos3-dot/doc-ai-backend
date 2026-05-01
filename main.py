@@ -14,7 +14,6 @@ import time
 import uuid
 import fitz
 
-
 import matplotlib.pyplot as plt
 import pandas as pd
 import pdfplumber
@@ -377,7 +376,6 @@ async def analizar():
 
         contenido = "\n\n".join(textos)
         contenido_ia = contenido[:5000]
-
         data = []
 
         api_key = os.getenv("GROQ_API_KEY")
@@ -489,26 +487,112 @@ Reglas estrictas:
 
 @app.get("/descargar-dashboard")
 def dashboard(tipo: str = "barras"):
-    global ultimo_resumen
+    global ultimo_resumen, ultimo_data
 
     if not ultimo_resumen:
         return {"error": "No hay datos"}
 
     clientes = [r["cliente"] for r in ultimo_resumen]
     totales = [r["total"] for r in ultimo_resumen]
+    path = "grafica.png"
+
+    if tipo == "combinado":
+        fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+
+        axs[0, 0].bar(clientes, totales)
+        axs[0, 0].set_title("Barras por cliente")
+        axs[0, 0].tick_params(axis="x", rotation=45)
+
+        axs[0, 1].pie(totales, labels=clientes, autopct="%1.1f%%", startangle=90)
+        axs[0, 1].set_title("Pastel por cliente")
+
+        meses = {}
+        for item in ultimo_data:
+            mes = item.get("mes", "N/A")
+            monto = limpiar_numero(item.get("monto", 0))
+            meses[mes] = meses.get(mes, 0) + monto
+
+        meses_keys = list(meses.keys())
+        meses_vals = list(meses.values())
+
+        axs[1, 0].plot(meses_keys, meses_vals, marker="o")
+        axs[1, 0].set_title("Linea por mes")
+        axs[1, 0].tick_params(axis="x", rotation=45)
+
+        axs[1, 1].scatter(range(len(totales)), totales)
+        axs[1, 1].set_title("Dispersion de montos")
+        axs[1, 1].set_xticks(range(len(clientes)))
+        axs[1, 1].set_xticklabels(clientes, rotation=45, ha="right")
+
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+
+        return FileResponse(path, media_type="image/png", filename="dashboard.png")
 
     plt.figure(figsize=(10, 5))
 
     if tipo == "pastel":
         plt.pie(totales, labels=clientes, autopct="%1.1f%%", startangle=90)
         plt.axis("equal")
+
+    elif tipo == "dona":
+        plt.pie(totales, labels=clientes, autopct="%1.1f%%", startangle=90)
+        centro = plt.Circle((0, 0), 0.55, fc="white")
+        fig = plt.gcf()
+        fig.gca().add_artist(centro)
+        plt.axis("equal")
+
+    elif tipo == "lineas":
+        meses = {}
+        for item in ultimo_data:
+            mes = item.get("mes", "N/A")
+            monto = limpiar_numero(item.get("monto", 0))
+            meses[mes] = meses.get(mes, 0) + monto
+
+        meses_keys = list(meses.keys())
+        meses_vals = list(meses.values())
+
+        plt.plot(meses_keys, meses_vals, marker="o")
+        plt.xticks(rotation=45, ha="right")
+        plt.title("Total por mes")
+
+    elif tipo == "dispersion":
+        plt.scatter(range(len(totales)), totales)
+        plt.xticks(range(len(clientes)), clientes, rotation=45, ha="right")
+        plt.title("Dispersion de montos por cliente")
+
+    elif tipo == "heatmap":
+        pivot = {}
+
+        for item in ultimo_data:
+            cliente = item.get("cliente", "N/A")
+            mes = item.get("mes", "N/A")
+            monto = limpiar_numero(item.get("monto", 0))
+            pivot[(cliente, mes)] = pivot.get((cliente, mes), 0) + monto
+
+        clientes_unicos = sorted(set(k[0] for k in pivot.keys()))
+        meses_unicos = sorted(set(k[1] for k in pivot.keys()))
+
+        matriz = []
+        for cliente in clientes_unicos:
+            fila = []
+            for mes in meses_unicos:
+                fila.append(pivot.get((cliente, mes), 0))
+            matriz.append(fila)
+
+        plt.imshow(matriz, aspect="auto")
+        plt.colorbar(label="Monto")
+        plt.xticks(range(len(meses_unicos)), meses_unicos, rotation=45, ha="right")
+        plt.yticks(range(len(clientes_unicos)), clientes_unicos)
+        plt.title("Heatmap cliente/mes")
+
     else:
         plt.bar(clientes, totales)
         plt.xticks(rotation=45, ha="right")
+        plt.title("Total por cliente")
 
     plt.tight_layout()
-
-    path = "grafica.png"
     plt.savefig(path)
     plt.close()
 
@@ -525,6 +609,31 @@ def excel():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="reporte.xlsx",
     )
+
+
+def construir_contexto_chat(contenido, query, limite=1200):
+    palabras = [
+        p.lower()
+        for p in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_]+", query)
+        if len(p) > 2
+    ]
+
+    lineas = contenido.splitlines()
+    relevantes = []
+
+    for linea in lineas:
+        linea_lower = linea.lower()
+
+        if any(p in linea_lower for p in palabras):
+            relevantes.append(linea)
+
+        if len("\n".join(relevantes)) >= limite:
+            break
+
+    if relevantes:
+        return "\n".join(relevantes)[:limite]
+
+    return contenido[:limite]
 
 
 @app.post("/chat")
@@ -546,10 +655,11 @@ async def chat(pregunta: dict):
 
         contenido = "\n\n".join(textos)
         query = (pregunta or {}).get("mensaje", "")
+        contexto_archivo = construir_contexto_chat(contenido, query)
 
         contexto_analisis = {
-            "registros_extraidos": ultimo_data[:40],
-            "resumen_por_cliente": ultimo_resumen[:40],
+            "registros_extraidos": ultimo_data[:10],
+            "resumen_por_cliente": ultimo_resumen[:10],
         }
 
         resp = client.chat.completions.create(
@@ -560,6 +670,7 @@ async def chat(pregunta: dict):
                     "content": """
 Responde únicamente usando la información de los archivos subidos y los datos extraídos.
 Si el usuario pregunta por clientes, productos, meses, montos, fechas o categorías, responde con los datos encontrados.
+Si el archivo es SQL, puedes explicar tablas, columnas, relaciones o consultas encontradas, pero no inventes estructuras que no aparezcan.
 No propongas consultas SQL a menos que el usuario pida explícitamente una consulta SQL.
 Si no encuentras la respuesta en los archivos, di que no aparece en los archivos.
 Sé breve y claro.
@@ -569,13 +680,13 @@ Sé breve y claro.
                     "role": "user",
                     "content": (
                         f"DATOS EXTRAÍDOS:\n{json.dumps(contexto_analisis, ensure_ascii=False)}"
-                        f"\n\nCONTENIDO DE ARCHIVOS:\n{contenido[:3000]}"
+                        f"\n\nCONTENIDO RELEVANTE DE ARCHIVOS:\n{contexto_archivo}"
                         f"\n\nPregunta: {query}"
                     ),
                 },
             ],
             temperature=0,
-           max_tokens=1500
+            max_tokens=500,
         )
 
         return {"respuesta": resp.choices[0].message.content}
