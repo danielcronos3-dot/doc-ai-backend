@@ -12,7 +12,8 @@ import os
 import re
 import time
 import uuid
-import fitz  
+import fitz
+
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -375,7 +376,7 @@ async def analizar():
             return {"data": [], "resumen": [], "mensaje": "Sube archivos primero"}
 
         contenido = "\n\n".join(textos)
-        contenido_ia = contenido[:8000]
+        contenido_ia = contenido[:5000]
 
         data = []
 
@@ -425,7 +426,7 @@ Reglas estrictas:
                         {"role": "user", "content": contenido_ia},
                     ],
                     temperature=0,
-                    max_tokens=2048,
+                    max_tokens=700,
                 )
 
                 texto_ia = resp.choices[0].message.content.strip()
@@ -547,8 +548,8 @@ async def chat(pregunta: dict):
         query = (pregunta or {}).get("mensaje", "")
 
         contexto_analisis = {
-            "registros_extraidos": ultimo_data[:200],
-            "resumen_por_cliente": ultimo_resumen,
+            "registros_extraidos": ultimo_data[:40],
+            "resumen_por_cliente": ultimo_resumen[:40],
         }
 
         resp = client.chat.completions.create(
@@ -568,13 +569,13 @@ Sé breve y claro.
                     "role": "user",
                     "content": (
                         f"DATOS EXTRAÍDOS:\n{json.dumps(contexto_analisis, ensure_ascii=False)}"
-                        f"\n\nCONTENIDO DE ARCHIVOS:\n{contenido[:12000]}"
+                        f"\n\nCONTENIDO DE ARCHIVOS:\n{contenido[:3000]}"
                         f"\n\nPregunta: {query}"
                     ),
                 },
             ],
             temperature=0,
-            max_tokens=2048,
+           max_tokens=1500
         )
 
         return {"respuesta": resp.choices[0].message.content}
