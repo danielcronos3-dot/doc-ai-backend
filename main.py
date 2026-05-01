@@ -1,43 +1,23 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import os
-import re
-import json
-import pandas as pd
-import matplotlib.pyplot as plt
-from groq import Groq
-import time
-import pdfplumber
-import uuid
-import base64
-import mimetypes
 from typing import List
 from dotenv import load_dotenv
+from groq import Groq
+
+import base64
+import json
+import mimetypes
+import os
+import re
+import time
+import uuid
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import pdfplumber
+
 load_dotenv()
-
-
-# =============================
-# 🔥 LOGGER PRO
-# =============================
-def log(tag, msg):
-    print(f"[{tag}] {msg}")
-
-def log_request(endpoint):
-    rid = str(uuid.uuid4())[:8]
-    log("REQ", f"{endpoint} | id={rid}")
-    return rid
-
-# =============================
-# OCR opcional
-# =============================
-try:
-    from pdf2image import convert_from_path
-    import pytesseract
-    OCR_DISPONIBLE = True
-except:
-    print("OCR no disponible")
-    OCR_DISPONIBLE = False
 
 app = FastAPI()
 
@@ -50,14 +30,110 @@ app.add_middleware(
 )
 
 textos = []
+ultimo_data = []
 ultimo_resumen = []
 
-# =============================
-# ROOT
-# =============================
+
+def log(tag, msg):
+    print(f"[{tag}] {msg}")
+
+
+def log_request(endpoint):
+    rid = str(uuid.uuid4())[:8]
+    log("REQ", f"{endpoint} | id={rid}")
+    return rid
+
+
+try:
+    from pdf2image import convert_from_path
+    import pytesseract
+
+    OCR_DISPONIBLE = True
+except Exception:
+    print("OCR no disponible")
+    OCR_DISPONIBLE = False
+
+
 @app.get("/")
 def root():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "archivos_en_memoria": len(textos),
+        "registros": len(ultimo_data),
+    }
+
+
+@app.post("/reset")
+async def reset():
+    global textos, ultimo_data, ultimo_resumen
+
+    textos = []
+    ultimo_data = []
+    ultimo_resumen = []
+
+    for archivo in ["reporte.xlsx", "grafica.png"]:
+        if os.path.exists(archivo):
+            try:
+                os.remove(archivo)
+            except Exception:
+                pass
+
+    return {"mensaje": "Datos eliminados"}
+
+
+def limpiar_numero(valor):
+    if valor is None:
+        return 0.0
+
+    if isinstance(valor, (int, float)):
+        return float(valor)
+
+    texto = str(valor)
+    texto = texto.replace("$", "").replace(",", "").strip()
+
+    try:
+        return float(texto)
+    except Exception:
+        return 0.0
+
+
+def normalizar_item(item):
+    cliente = str(item.get("cliente", "N/A") or "N/A").strip()
+    producto = str(item.get("producto", "N/A") or "N/A").strip()
+    fecha = str(item.get("fecha", "N/A") or "N/A").strip()
+    mes = str(item.get("mes", "N/A") or "N/A").strip()
+    categoria = str(item.get("categoria", "N/A") or "N/A").strip()
+    descripcion = str(item.get("descripcion", "N/A") or "N/A").strip()
+    monto = limpiar_numero(item.get("monto", 0))
+
+    if mes == "N/A" and re.match(r"^\d{4}-\d{2}-\d{2}$", fecha):
+        mes = fecha[:7]
+
+    return {
+        "cliente": cliente,
+        "producto": producto,
+        "monto": monto,
+        "fecha": fecha,
+        "mes": mes,
+        "categoria": categoria,
+        "descripcion": descripcion,
+    }
+
+
+def extraer_json_lista(texto):
+    match = re.search(r"\[.*\]", texto, re.DOTALL)
+    if not match:
+        return []
+
+    try:
+        datos = json.loads(match.group(0))
+        if not isinstance(datos, list):
+            return []
+        return [normalizar_item(x) for x in datos if isinstance(x, dict)]
+    except Exception as e:
+        print(f"JSON parse error: {e}")
+        return []
+
 
 def extraer_texto_pdf(path):
     texto = ""
@@ -65,7 +141,7 @@ def extraer_texto_pdf(path):
     try:
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages:
-                texto += page.extract_text() or ""
+                texto += (page.extract_text() or "") + "\n"
     except Exception as e:
         print(f"pdfplumber error: {e}")
 
@@ -73,7 +149,7 @@ def extraer_texto_pdf(path):
         try:
             images = convert_from_path(path)
             for img in images:
-                texto += pytesseract.image_to_string(img)
+                texto += pytesseract.image_to_string(img) + "\n"
         except Exception as e:
             print(f"OCR PDF error: {e}")
 
@@ -82,11 +158,13 @@ def extraer_texto_pdf(path):
 
 def extraer_texto_imagen(path):
     api_key = os.getenv("GROQ_API_KEY")
-
     if not api_key:
         return ""
 
     try:
+        if os.path.getsize(path) > 4 * 1024 * 1024:
+            return "Imagen demasiado grande para procesar con Vision."
+
         mime_type, _ = mimetypes.guess_type(path)
         if not mime_type:
             mime_type = "image/jpeg"
@@ -104,19 +182,20 @@ def extraer_texto_imagen(path):
                     "content": [
                         {
                             "type": "text",
-                            "text": """
-Lee esta imagen y extrae todo el texto visible.
-Si hay clientes, montos, fechas, facturas o tablas, respétalos.
-Devuelve únicamente texto plano, sin explicación.
-"""
+                            "text": (
+                                "Lee esta imagen y extrae todo el texto visible. "
+                                "Si hay tablas, clientes, productos, montos, fechas, "
+                                "facturas o meses, conserva la estructura lo mejor posible. "
+                                "Devuelve solo texto plano."
+                            ),
                         },
                         {
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:{mime_type};base64,{base64_image}"
-                            }
-                        }
-                    ]
+                            },
+                        },
+                    ],
                 }
             ],
             temperature=0,
@@ -130,7 +209,6 @@ Devuelve únicamente texto plano, sin explicación.
         return ""
 
 
-
 def extraer_texto_excel(path):
     try:
         hojas = pd.read_excel(path, sheet_name=None)
@@ -139,6 +217,7 @@ def extraer_texto_excel(path):
         for nombre_hoja, df in hojas.items():
             texto += f"\n\nHOJA: {nombre_hoja}\n"
             texto += df.to_string(index=False)
+            texto += "\n"
 
         return texto
     except Exception as e:
@@ -155,9 +234,22 @@ def extraer_texto_simple(path):
         return ""
 
 
-# =============================
-# UPLOAD
-# =============================
+def extraer_texto_archivo(path, ext):
+    if ext == ".pdf":
+        return extraer_texto_pdf(path)
+
+    if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
+        return extraer_texto_imagen(path)
+
+    if ext in [".xlsx", ".xls"]:
+        return extraer_texto_excel(path)
+
+    if ext in [".csv", ".sql", ".txt", ".json", ".xml", ".html", ".md"]:
+        return extraer_texto_simple(path)
+
+    return extraer_texto_simple(path)
+
+
 @app.post("/upload")
 async def upload(files: List[UploadFile] = File(...)):
     global textos
@@ -166,228 +258,175 @@ async def upload(files: List[UploadFile] = File(...)):
     start = time.time()
 
     try:
-        textos = []
         previews = []
 
         for file in files:
             contenido = await file.read()
             filename = file.filename or "archivo"
             ext = os.path.splitext(filename.lower())[1]
-
             safe_name = f"temp_{uuid.uuid4().hex}{ext}"
 
             with open(safe_name, "wb") as f:
                 f.write(contenido)
 
-            log(rid, f"📦 {filename}: {len(contenido)} bytes")
+            log(rid, f"{filename}: {len(contenido)} bytes")
 
-            texto = ""
-
-            if ext == ".pdf":
-                texto = extraer_texto_pdf(safe_name)
-
-            elif ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
-                texto = extraer_texto_imagen(safe_name)
-
-            elif ext in [".xlsx", ".xls", ".csv"]:
-                if ext == ".csv":
-                    texto = extraer_texto_simple(safe_name)
-                else:
-                    texto = extraer_texto_excel(safe_name)
-
-            elif ext in [".sql", ".txt", ".json", ".xml", ".html", ".md"]:
-                texto = extraer_texto_simple(safe_name)
-
-            else:
-                texto = extraer_texto_simple(safe_name)
-
+            texto = extraer_texto_archivo(safe_name, ext)
             texto_con_nombre = f"\n\n===== ARCHIVO: {filename} =====\n{texto}"
+
             textos.append(texto_con_nombre)
 
-            previews.append({
-                "archivo": filename,
-                "texto_len": len(texto),
-                "preview": texto[:200]
-            })
+            previews.append(
+                {
+                    "archivo": filename,
+                    "texto_len": len(texto),
+                    "preview": texto[:200],
+                }
+            )
 
             try:
                 os.remove(safe_name)
-            except:
+            except Exception:
                 pass
 
-        log(rid, f"📄 archivos procesados: {len(textos)}")
-        log(rid, f"⏱ {round(time.time()-start, 2)}s")
+        log(rid, f"archivos en memoria: {len(textos)}")
+        log(rid, f"total {round(time.time() - start, 2)}s")
 
         return {
             "mensaje": "OK",
-            "archivos": len(textos),
-            "previews": previews
+            "archivos_subidos": len(files),
+            "archivos_en_memoria": len(textos),
+            "previews": previews,
         }
 
     except Exception as e:
-        log(rid, f"🔥 ERROR UPLOAD: {e}")
+        log(rid, f"ERROR UPLOAD: {e}")
         return {"mensaje": "ERROR", "error": str(e)}
 
-# =============================
-# ANALIZAR
-# =============================
+
 @app.post("/analizar")
 async def analizar():
-    global textos, ultimo_resumen
+    global textos, ultimo_data, ultimo_resumen
 
     rid = log_request("ANALIZAR")
     start = time.time()
 
     try:
-        modo_test = False  # CAMBIA A True PARA DEBUG
+        if not textos or not "\n".join(textos).strip():
+            return {"data": [], "resumen": [], "mensaje": "Sube archivos primero"}
 
+        contenido = "\n\n".join(textos)
+        contenido_ia = contenido[:12000]
         data = []
 
-        # 🧪 TEST
-        if modo_test:
-            log(rid, "🧪 MODO TEST")
-            data = [
-                {"cliente": "Carlos", "monto": 1200, "fecha": "2026"},
-                {"cliente": "Ana", "monto": 2500, "fecha": "2026"},
-                {"cliente": "Carlos", "monto": 800, "fecha": "2026"},
-            ]
+        api_key = os.getenv("GROQ_API_KEY")
 
-        else:
-            if not textos or not textos[0].strip():
-                log(rid, "⚠️ sin texto extraído")
-                data = [
-                    {"cliente": "Carlos Pérez", "monto": 1200, "fecha": "2026-01-15"},
-                    {"cliente": "Ana Gómez", "monto": 2500, "fecha": "2026-02-20"},
-                    {"cliente": "Carlos Pérez", "monto": 800, "fecha": "2026-03-10"},
-                ]
-            else:
-                contenido = "\n\n".join(textos)
+        if api_key:
+            try:
+                client = Groq(api_key=api_key)
+                log(rid, f"consultando IA con {len(contenido_ia)} chars")
 
-                log(rid, f"📄 texto len: {len(contenido)}")
-
-            # 🤖 IA
-            api_key = os.getenv("GROQ_API_KEY")
-
-            if api_key:
-                
-                    client = Groq(api_key=api_key)
-                    contenido = contenido[:3000]  # 🔥 CLAVE
-            
-                    log(rid, "🧠 consultando IA...")
-
-                    resp = client.chat.completions.create(
-                       model="llama-3.1-8b-instant",
-                        messages=[
-                            {"role": "system",
+                resp = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {
+                            "role": "system",
                             "content": """
-                            Extrae únicamente pagos, clientes, montos y fechas del documento.
-                            Devuelve SOLO JSON válido, sin explicación, sin markdown.
-                            NO recortes nombres.
-                            NO regreses abreviaciones como 'ndez'.
-                            NO inventes.
-                            
-                            Devuelve JSON así:
-                            [
-                                {"cliente":"Nombre completo","monto":123,"fecha":"YYYY-MM-DD"}
-                                ...
-                            ]
-                            Reglas:
-                            - El campo cliente debe contener el nombre completo.
-                            - Conserva acentos y apellidos completos.
-                            - No recortes nombres.
-                            - No devuelvas fragmentos como "rez", "ndez", "mez" o "nchez".
-                            - Si no hay fecha, usa "N/A".
-                            - Si no estás seguro, no inventes, mejor omite el ítem.
-                            """},
-                            {"role": "user",
-                            "content": contenido[:3000]}
-                        ]
-                    )
-                    try:
+Extrae toda la información útil de los archivos.
 
-                        texto_ia = resp.choices[0].message.content.strip()
-                        print("IA RESPUESTA:", texto_ia)
+Devuelve SOLO JSON válido, sin explicación, sin markdown.
 
-                        match = re.search(r"\[.*\]", texto_ia, re.DOTALL)
-                        if match:
-                             data = json.loads(match.group(0))
-                        else:
-                            print("⚠️ IA no devolvió JSON válido")
+Formato exacto:
+[
+  {
+    "cliente": "Nombre completo o N/A",
+    "producto": "Producto o servicio o N/A",
+    "monto": 123.45,
+    "fecha": "YYYY-MM-DD o N/A",
+    "mes": "YYYY-MM o N/A",
+    "categoria": "Categoría o N/A",
+    "descripcion": "Detalle breve"
+  }
+]
 
-                    except Exception as e:
-                       log(rid, f"🔥 IA ERROR: {e}")
-
-            # fallback
-            if not data:
-                log(rid, "🧯 regex fallback")
-
-                lineas = contenido.splitlines()
-                patron = re.compile(
-                r"([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*)\s+\$?\s*([\d,]+(?:\.\d+)?)"
+Reglas:
+- Devuelve una fila por cada compra, pago, factura, producto, servicio o movimiento detectado.
+- Conserva nombres completos, productos, servicios, fechas, meses, importes y categorías.
+- Si hay varios meses, conserva el mes de cada movimiento.
+- Si no hay un dato, usa "N/A".
+- No inventes.
+- No recortes nombres.
+""",
+                        },
+                        {"role": "user", "content": contenido_ia},
+                    ],
+                    temperature=0,
+                    max_tokens=4096,
                 )
-                for linea in lineas:
-                    linea = linea.strip()
-                    if not linea: 
-                        continue
-                
-                matches = patron.findall(contenido)
-                for cliente, monto in matches:
-                    try:
-                        cliente = cliente.strip()
-                        monto_limpio = monto.replace(",", "")
-                        # Evita capturar palabras basura muy cortas
-                        if len(cliente) < 3:
-                            continue
 
-                        data.append({
-                            "cliente": cliente,
-                            "monto": float(monto_limpio),
-                            "fecha": "N/A"
-                        })
-                    except Exception as e:
-                        log(rid, f"⚠️ fallback item inválido: {e}")
+                texto_ia = resp.choices[0].message.content.strip()
+                print("IA RESPUESTA:", texto_ia[:2000])
+                data = extraer_json_lista(texto_ia)
 
-        # fallback final
+            except Exception as e:
+                log(rid, f"IA ERROR: {e}")
+
         if not data:
-            log(rid, "⚠️ DEMO")
-            data = [
-                {"cliente": "Carlos Pérez", "monto": 1200, "fecha": "2026-01-15"},
-                {"cliente": "Ana Gómez", "monto": 2500, "fecha": "2026-02-20"},
-                {"cliente": "Carlos Pérez", "monto": 800, "fecha": "2026-03-10"},
-            ]
+            log(rid, "regex fallback")
 
-        # resumen
+            patron = re.compile(
+                r"([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*)\s+\$?\s*([\d,]+(?:\.\d+)?)"
+            )
+
+            for cliente, monto in patron.findall(contenido):
+                cliente = cliente.strip()
+                if len(cliente) < 3:
+                    continue
+
+                data.append(
+                    normalizar_item(
+                        {
+                            "cliente": cliente,
+                            "producto": "N/A",
+                            "monto": monto,
+                            "fecha": "N/A",
+                            "mes": "N/A",
+                            "categoria": "N/A",
+                            "descripcion": "Extraído por regex",
+                        }
+                    )
+                )
+
         resumen = {}
         for item in data:
-        
-            resumen[item["cliente"]] = resumen.get(item["cliente"], 0) + item["monto"]
+            cliente = item.get("cliente", "N/A")
+            monto = limpiar_numero(item.get("monto", 0))
+            resumen[cliente] = resumen.get(cliente, 0) + monto
 
         resumen_lista = [{"cliente": k, "total": v} for k, v in resumen.items()]
 
-        log(rid, f"📊 {resumen_lista}")
-
+        ultimo_data = data
         ultimo_resumen = resumen_lista
 
-        # excel
         df = pd.DataFrame(data)
         df.to_excel("reporte.xlsx", index=False)
 
-        log(rid, f"⏱ total {round(time.time()-start,2)}s")
+        log(rid, f"registros: {len(data)}")
+        log(rid, f"total {round(time.time() - start, 2)}s")
 
         return {
             "data": data,
-            "resumen": resumen_lista
+            "resumen": resumen_lista,
+            "archivos_en_memoria": len(textos),
         }
 
     except Exception as e:
-        log(rid, f"🔥 ERROR ANALIZAR: {e}")
-        return {"data": [], "resumen": []}
+        log(rid, f"ERROR ANALIZAR: {e}")
+        return {"data": [], "resumen": [], "error": str(e)}
 
-# =============================
-# DASHBOARD
-# =============================
+
 @app.get("/descargar-dashboard")
-def dashboard():
+def dashboard(tipo: str = "barras"):
     global ultimo_resumen
 
     if not ultimo_resumen:
@@ -397,8 +436,14 @@ def dashboard():
     totales = [r["total"] for r in ultimo_resumen]
 
     plt.figure(figsize=(10, 5))
-    plt.bar(clientes, totales)
-    plt.xticks(rotation=45)
+
+    if tipo == "pastel":
+        plt.pie(totales, labels=clientes, autopct="%1.1f%%", startangle=90)
+        plt.axis("equal")
+    else:
+        plt.bar(clientes, totales)
+        plt.xticks(rotation=45, ha="right")
+
     plt.tight_layout()
 
     path = "grafica.png"
@@ -407,9 +452,7 @@ def dashboard():
 
     return FileResponse(path, media_type="image/png", filename="dashboard.png")
 
-# =============================
-# EXCEL
-# =============================
+
 @app.get("/descargar-excel")
 def excel():
     if not os.path.exists("reporte.xlsx"):
@@ -418,36 +461,34 @@ def excel():
     return FileResponse(
         "reporte.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="reporte.xlsx"
+        filename="reporte.xlsx",
     )
 
-# =============================
-# CHAT
-# =============================
+
 @app.post("/chat")
 async def chat(pregunta: dict):
-    global textos
+    global textos, ultimo_data, ultimo_resumen
 
     rid = log_request("CHAT")
 
     try:
         if not textos or not "\n".join(textos).strip():
-
-            return {"respuesta": "Sube un PDF primero"}
+            return {"respuesta": "Sube archivos primero"}
 
         api_key = os.getenv("GROQ_API_KEY")
 
         if not api_key:
-            log(rid, "🚨 sin API key")
             return {"respuesta": "Error: API Key no configurada"}
 
         client = Groq(api_key=api_key)
 
         contenido = "\n\n".join(textos)
-
         query = (pregunta or {}).get("mensaje", "")
 
-        log(rid, f"🧠 {query}")
+        contexto_analisis = {
+            "registros_extraidos": ultimo_data[:200],
+            "resumen_por_cliente": ultimo_resumen,
+        }
 
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -455,21 +496,28 @@ async def chat(pregunta: dict):
                 {
                     "role": "system",
                     "content": """
-                Responde únicamente usando la información de los archivos subidos.
-                Si el usuario pregunta por datos concretos, responde con los datos encontrados.
-                No propongas consultas SQL a menos que el usuario pida explícitamente una consulta SQL.
-                Si no encuentras la respuesta en los archivos, di que no aparece en los archivos.
-                """
+Responde únicamente usando la información de los archivos subidos y los datos extraídos.
+Si el usuario pregunta por clientes, productos, meses, montos, fechas o categorías, responde con los datos encontrados.
+No propongas consultas SQL a menos que el usuario pida explícitamente una consulta SQL.
+Si no encuentras la respuesta en los archivos, di que no aparece en los archivos.
+Sé breve y claro.
+""",
                 },
-
-                {"role": "user", "content": f"{contenido}\n\nPregunta: {query}"}
-            ]
+                {
+                    "role": "user",
+                    "content": (
+                        f"DATOS EXTRAÍDOS:\n{json.dumps(contexto_analisis, ensure_ascii=False)}"
+                        f"\n\nCONTENIDO DE ARCHIVOS:\n{contenido[:12000]}"
+                        f"\n\nPregunta: {query}"
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=2048,
         )
-
-        log(rid, "🤖 OK")
 
         return {"respuesta": resp.choices[0].message.content}
 
     except Exception as e:
-        log(rid, f"🔥 ERROR CHAT: {e}")
+        log(rid, f"ERROR CHAT: {e}")
         return {"respuesta": f"Error IA: {str(e)}"}
