@@ -10,6 +10,7 @@ from groq import Groq
 import time
 import pdfplumber
 import uuid
+from typing import List
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -56,57 +57,134 @@ ultimo_resumen = []
 def root():
     return {"status": "ok"}
 
+def extraer_texto_pdf(path):
+    texto = ""
+
+    try:
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                texto += page.extract_text() or ""
+    except Exception as e:
+        print(f"pdfplumber error: {e}")
+
+    if not texto.strip() and OCR_DISPONIBLE:
+        try:
+            images = convert_from_path(path)
+            for img in images:
+                texto += pytesseract.image_to_string(img)
+        except Exception as e:
+            print(f"OCR PDF error: {e}")
+
+    return texto
+
+
+def extraer_texto_imagen(path):
+    if not OCR_DISPONIBLE:
+        return ""
+
+    try:
+        return pytesseract.image_to_string(path)
+    except Exception as e:
+        print(f"OCR imagen error: {e}")
+        return ""
+
+
+def extraer_texto_excel(path):
+    try:
+        hojas = pd.read_excel(path, sheet_name=None)
+        texto = ""
+
+        for nombre_hoja, df in hojas.items():
+            texto += f"\n\nHOJA: {nombre_hoja}\n"
+            texto += df.to_string(index=False)
+
+        return texto
+    except Exception as e:
+        print(f"Excel error: {e}")
+        return ""
+
+
+def extraer_texto_simple(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception as e:
+        print(f"Texto simple error: {e}")
+        return ""
+
+
 # =============================
 # UPLOAD
 # =============================
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(files: List[UploadFile] = File(...)):
     global textos
 
     rid = log_request("UPLOAD")
     start = time.time()
 
     try:
-        contenido = await file.read()
-        log(rid, f"📦 tamaño: {len(contenido)} bytes")
+        textos = []
+        previews = []
 
-        with open("temp.pdf", "wb") as f:
-            f.write(contenido)
+        for file in files:
+            contenido = await file.read()
+            filename = file.filename or "archivo"
+            ext = os.path.splitext(filename.lower())[1]
 
-        texto = ""
+            safe_name = f"temp_{uuid.uuid4().hex}{ext}"
 
-        try:
-            with pdfplumber.open("temp.pdf") as pdf:
-                for page in pdf.pages:
-                    texto += page.extract_text() or ""
-        except Exception as e:
-            log(rid, f"⚠️ pdfplumber: {e}")
+            with open(safe_name, "wb") as f:
+                f.write(contenido)
 
-        if not texto.strip() and OCR_DISPONIBLE:
-            log(rid, "🔍 OCR activado")
+            log(rid, f"📦 {filename}: {len(contenido)} bytes")
+
+            texto = ""
+
+            if ext == ".pdf":
+                texto = extraer_texto_pdf(safe_name)
+
+            elif ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
+                texto = extraer_texto_imagen(safe_name)
+
+            elif ext in [".xlsx", ".xls", ".csv"]:
+                if ext == ".csv":
+                    texto = extraer_texto_simple(safe_name)
+                else:
+                    texto = extraer_texto_excel(safe_name)
+
+            elif ext in [".sql", ".txt", ".json", ".xml", ".html", ".md"]:
+                texto = extraer_texto_simple(safe_name)
+
+            else:
+                texto = extraer_texto_simple(safe_name)
+
+            texto_con_nombre = f"\n\n===== ARCHIVO: {filename} =====\n{texto}"
+            textos.append(texto_con_nombre)
+
+            previews.append({
+                "archivo": filename,
+                "texto_len": len(texto),
+                "preview": texto[:200]
+            })
+
             try:
-                images = convert_from_path("temp.pdf")
-                for img in images:
-                    texto += pytesseract.image_to_string(img)
-            except Exception as e:
-                log(rid, f"⚠️ OCR: {e}")
+                os.remove(safe_name)
+            except:
+                pass
 
-        textos = [texto]
-
-        log(rid, f"📄 texto: {len(texto)} chars")
-        log(rid, f"PREVIEW: {texto[:300]}")
-        log(rid, f"⏱ {round(time.time()-start,2)}s")
+        log(rid, f"📄 archivos procesados: {len(textos)}")
+        log(rid, f"⏱ {round(time.time()-start, 2)}s")
 
         return {
             "mensaje": "OK",
-            "texto_len": len(texto),
-            "preview": texto[:300]
-                }
-
+            "archivos": len(textos),
+            "previews": previews
+        }
 
     except Exception as e:
         log(rid, f"🔥 ERROR UPLOAD: {e}")
-        return {"mensaje": "ERROR"}
+        return {"mensaje": "ERROR", "error": str(e)}
 
 # =============================
 # ANALIZAR
