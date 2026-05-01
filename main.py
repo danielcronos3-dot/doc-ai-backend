@@ -500,6 +500,38 @@ Reglas estrictas:
             resumen[cliente] = resumen.get(cliente, 0) + monto
 
         resumen_lista = [{"cliente": k, "total": v} for k, v in resumen.items()]
+        def generar_insights(data, resumen):
+            insights = []
+
+            if not resumen:
+                return insights
+
+            total = sum(r["total"] for r in resumen)
+
+            # 🔥 Cliente top
+            top = max(resumen, key=lambda x: x["total"])
+            porcentaje = (top["total"] / total) * 100 if total > 0 else 0
+
+            insights.append(
+                f"El cliente {top['cliente']} genera el {porcentaje:.1f}% de los ingresos"
+            )
+
+            # 📈 Ventas por mes
+            por_mes = {}
+            for item in data:
+                mes = item.get("mes", "N/A")
+                monto = item.get("monto", 0)
+                por_mes[mes] = por_mes.get(mes, 0) + monto
+
+            if por_mes:
+                mejor_mes = max(por_mes, key=por_mes.get)
+                insights.append(f"El mes con más ingresos fue {mejor_mes}")
+
+            # ⚠️ Dependencia de clientes
+            if porcentaje > 50:
+                insights.append("Existe alta dependencia de un solo cliente")
+
+            return insights
 
         sesion["ultimo_data"] = data
         sesion["ultimo_resumen"] = resumen_lista
@@ -509,13 +541,13 @@ Reglas estrictas:
 
         log(rid, f"registros: {len(data)}")
         log(rid, f"total {round(time.time() - start, 2)}s")
+        insights = generar_insights(data, resumen_lista)
 
         return {
             "data": data,
             "resumen": resumen_lista,
-            "archivos_en_memoria": len(textos),
+            "insights": insights,
         }
-
     except Exception as e:
         log(rid, f"ERROR ANALIZAR: {e}")
         return {"data": [], "resumen": [], "error": str(e)}
@@ -682,6 +714,7 @@ def construir_contexto_chat(contenido, query, limite=1200):
 @app.post("/chat")
 async def chat(request: Request, pregunta: dict):
     
+
     rid = log_request("CHAT")
     user_id = get_user_id(request)
     sesion = get_sesion(user_id)
