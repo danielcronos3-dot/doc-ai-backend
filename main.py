@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from typing import List
@@ -34,9 +34,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-textos = []
-ultimo_data = []
-ultimo_resumen = []
+sesiones = {}
+
 
 
 def log(tag, msg):
@@ -48,13 +47,39 @@ def log_request(endpoint):
     log("REQ", f"{endpoint} | id={rid}")
     return rid
 
+def limpiar_user_id(user_id):
+    user_id = str(user_id or "anon").strip()
+    return re.sub(r"[^A-Za-z0-9_-]", "_", user_id)
+
+
+def get_user_id(request):
+    return limpiar_user_id(request.headers.get("X-User-Id", "anon"))
+
+
+def get_sesion(user_id):
+    if user_id not in sesiones:
+        sesiones[user_id] = {
+            "textos": [],
+            "ultimo_data": [],
+            "ultimo_resumen": [],
+        }
+
+    return sesiones[user_id]
+
+
+def reporte_path(user_id):
+    return f"reporte_{user_id}.xlsx"
+
+
+def grafica_path(user_id):
+    return f"grafica_{user_id}.png"
+
 
 @app.get("/")
 def root():
     return {
         "status": "ok",
-        "archivos_en_memoria": len(textos),
-        "registros": len(ultimo_data),
+        "sesiones": len(sesiones),
         "vision_model": VISION_MODEL,
         "extract_model": EXTRACT_MODEL,
         "chat_model": CHAT_MODEL,
@@ -62,14 +87,16 @@ def root():
 
 
 @app.post("/reset")
-async def reset():
-    global textos, ultimo_data, ultimo_resumen
+async def reset(request: Request):
+    user_id = get_user_id(request)
 
-    textos = []
-    ultimo_data = []
-    ultimo_resumen = []
+    sesiones[user_id] = {
+        "textos": [],
+        "ultimo_data": [],
+        "ultimo_resumen": [],
+    }
 
-    for archivo in ["reporte.xlsx", "grafica.png"]:
+    for archivo in [reporte_path(user_id), grafica_path(user_id)]:
         if os.path.exists(archivo):
             try:
                 os.remove(archivo)
@@ -77,6 +104,7 @@ async def reset():
                 pass
 
     return {"mensaje": "Datos eliminados"}
+
 
 
 def limpiar_numero(valor):
@@ -310,11 +338,14 @@ def extraer_texto_archivo(path, ext):
 
 
 @app.post("/upload")
-async def upload(files: List[UploadFile] = File(...)):
-    global textos
+async def upload(request: Request, files: List[UploadFile] = File(...)):
+
 
     rid = log_request("UPLOAD")
     start = time.time()
+    user_id = get_user_id(request)
+    sesion = get_sesion(user_id)
+
 
     try:
         previews = []
@@ -333,7 +364,8 @@ async def upload(files: List[UploadFile] = File(...)):
             texto = extraer_texto_archivo(safe_name, ext)
             texto_con_nombre = f"\n\n===== ARCHIVO: {filename} =====\n{texto}"
 
-            textos.append(texto_con_nombre)
+            sesion["textos"].append(texto_con_nombre)
+
 
             previews.append(
                 {
@@ -348,13 +380,14 @@ async def upload(files: List[UploadFile] = File(...)):
             except Exception:
                 pass
 
-        log(rid, f"archivos en memoria: {len(textos)}")
+        log(rid, f"user {user_id} archivos en memoria: {len(sesion['textos'])}")
+
         log(rid, f"total {round(time.time() - start, 2)}s")
 
         return {
             "mensaje": "OK",
             "archivos_subidos": len(files),
-            "archivos_en_memoria": len(textos),
+            "archivos_en_memoria": len(sesion["textos"]),
             "previews": previews,
         }
 
@@ -364,11 +397,14 @@ async def upload(files: List[UploadFile] = File(...)):
 
 
 @app.post("/analizar")
-async def analizar():
-    global textos, ultimo_data, ultimo_resumen
+async def analizar(request: Request):
+    
 
     rid = log_request("ANALIZAR")
     start = time.time()
+    user_id = get_user_id(request)
+    sesion = get_sesion(user_id)
+    textos = sesion["textos"]
 
     try:
         if not textos or not "\n".join(textos).strip():
@@ -465,11 +501,11 @@ Reglas estrictas:
 
         resumen_lista = [{"cliente": k, "total": v} for k, v in resumen.items()]
 
-        ultimo_data = data
-        ultimo_resumen = resumen_lista
+        sesion["ultimo_data"] = data
+        sesion["ultimo_resumen"] = resumen_lista
 
         df = pd.DataFrame(data)
-        df.to_excel("reporte.xlsx", index=False)
+        df.to_excel(reporte_path(user_id), index=False)
 
         log(rid, f"registros: {len(data)}")
         log(rid, f"total {round(time.time() - start, 2)}s")
@@ -486,15 +522,20 @@ Reglas estrictas:
 
 
 @app.get("/descargar-dashboard")
-def dashboard(tipo: str = "barras"):
-    global ultimo_resumen, ultimo_data
+def dashboard(request: Request, tipo: str = "barras"):
+    user_id = get_user_id(request)
+    sesion = get_sesion(user_id)
+
+    ultimo_resumen = sesion["ultimo_resumen"]
+    ultimo_data = sesion["ultimo_data"]
 
     if not ultimo_resumen:
         return {"error": "No hay datos"}
 
     clientes = [r["cliente"] for r in ultimo_resumen]
     totales = [r["total"] for r in ultimo_resumen]
-    path = "grafica.png"
+    path = grafica_path(user_id)
+
 
     if tipo == "combinado":
         fig, axs = plt.subplots(2, 2, figsize=(14, 10))
@@ -600,12 +641,14 @@ def dashboard(tipo: str = "barras"):
 
 
 @app.get("/descargar-excel")
-def excel():
-    if not os.path.exists("reporte.xlsx"):
+def excel(request: Request):
+    user_id = get_user_id(request)
+    path = reporte_path(user_id)
+    if not os.path.exists(path):
         return {"error": "No existe"}
 
     return FileResponse(
-        "reporte.xlsx",
+         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="reporte.xlsx",
     )
@@ -637,10 +680,15 @@ def construir_contexto_chat(contenido, query, limite=1200):
 
 
 @app.post("/chat")
-async def chat(pregunta: dict):
-    global textos, ultimo_data, ultimo_resumen
-
+async def chat(request: Request, pregunta: dict):
+    
     rid = log_request("CHAT")
+    user_id = get_user_id(request)
+    sesion = get_sesion(user_id)
+
+    textos = sesion["textos"]
+    ultimo_data = sesion["ultimo_data"]
+    ultimo_resumen = sesion["ultimo_resumen"]
 
     try:
         if not textos or not "\n".join(textos).strip():
