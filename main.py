@@ -10,6 +10,8 @@ from groq import Groq
 import time
 import pdfplumber
 import uuid
+import base64
+import mimetypes
 from typing import List
 from dotenv import load_dotenv
 load_dotenv()
@@ -79,14 +81,54 @@ def extraer_texto_pdf(path):
 
 
 def extraer_texto_imagen(path):
-    if not OCR_DISPONIBLE:
+    api_key = os.getenv("GROQ_API_KEY")
+
+    if not api_key:
         return ""
 
     try:
-        return pytesseract.image_to_string(path)
+        mime_type, _ = mimetypes.guess_type(path)
+        if not mime_type:
+            mime_type = "image/jpeg"
+
+        with open(path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+
+        client = Groq(api_key=api_key)
+
+        resp = client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": """
+Lee esta imagen y extrae todo el texto visible.
+Si hay clientes, montos, fechas, facturas o tablas, respétalos.
+Devuelve únicamente texto plano, sin explicación.
+"""
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0,
+            max_completion_tokens=2048,
+        )
+
+        return resp.choices[0].message.content.strip()
+
     except Exception as e:
-        print(f"OCR imagen error: {e}")
+        print(f"Vision imagen error: {e}")
         return ""
+
 
 
 def extraer_texto_excel(path):
@@ -219,7 +261,8 @@ async def analizar():
                     {"cliente": "Carlos Pérez", "monto": 800, "fecha": "2026-03-10"},
                 ]
             else:
-                contenido = textos[0]
+                contenido = "\n\n".join(textos)
+
                 log(rid, f"📄 texto len: {len(contenido)}")
 
             # 🤖 IA
@@ -388,7 +431,8 @@ async def chat(pregunta: dict):
     rid = log_request("CHAT")
 
     try:
-        if not textos:
+        if not textos or not "\n".join(textos).strip():
+
             return {"respuesta": "Sube un PDF primero"}
 
         api_key = os.getenv("GROQ_API_KEY")
@@ -399,7 +443,8 @@ async def chat(pregunta: dict):
 
         client = Groq(api_key=api_key)
 
-        contenido = textos[0]
+        contenido = "\n\n".join(textos)
+
         query = (pregunta or {}).get("mensaje", "")
 
         log(rid, f"🧠 {query}")
@@ -407,7 +452,16 @@ async def chat(pregunta: dict):
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "Responde basado en el documento"},
+                {
+                    "role": "system",
+                    "content": """
+                Responde únicamente usando la información de los archivos subidos.
+                Si el usuario pregunta por datos concretos, responde con los datos encontrados.
+                No propongas consultas SQL a menos que el usuario pida explícitamente una consulta SQL.
+                Si no encuentras la respuesta en los archivos, di que no aparece en los archivos.
+                """
+                },
+
                 {"role": "user", "content": f"{contenido}\n\nPregunta: {query}"}
             ]
         )
