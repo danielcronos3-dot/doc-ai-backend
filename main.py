@@ -12,13 +12,17 @@ import os
 import re
 import time
 import uuid
-import fitz
+import fitz  
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import pdfplumber
 
 load_dotenv()
+
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+CHAT_MODEL = "llama-3.1-8b-instant"
 
 app = FastAPI()
 
@@ -51,6 +55,9 @@ def root():
         "status": "ok",
         "archivos_en_memoria": len(textos),
         "registros": len(ultimo_data),
+        "vision_model": VISION_MODEL,
+        "extract_model": EXTRACT_MODEL,
+        "chat_model": CHAT_MODEL,
     }
 
 
@@ -227,7 +234,7 @@ def extraer_texto_imagen(path):
         client = Groq(api_key=api_key)
 
         resp = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model=VISION_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -368,7 +375,8 @@ async def analizar():
             return {"data": [], "resumen": [], "mensaje": "Sube archivos primero"}
 
         contenido = "\n\n".join(textos)
-        contenido_ia = contenido[:12000]
+        contenido_ia = contenido[:8000]
+
         data = []
 
         api_key = os.getenv("GROQ_API_KEY")
@@ -379,7 +387,7 @@ async def analizar():
                 log(rid, f"consultando IA con {len(contenido_ia)} chars")
 
                 resp = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model=EXTRACT_MODEL,
                     messages=[
                         {
                             "role": "system",
@@ -417,7 +425,7 @@ Reglas estrictas:
                         {"role": "user", "content": contenido_ia},
                     ],
                     temperature=0,
-                    max_tokens=4096,
+                    max_tokens=2048,
                 )
 
                 texto_ia = resp.choices[0].message.content.strip()
@@ -544,7 +552,7 @@ async def chat(pregunta: dict):
         }
 
         resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=CHAT_MODEL,
             messages=[
                 {
                     "role": "system",
