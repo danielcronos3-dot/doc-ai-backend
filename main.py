@@ -159,6 +159,43 @@ def normalizar_item(item):
         "categoria": categoria,
         "descripcion": descripcion,
     }
+def procesar_inteligente(texto, ext):
+    texto_lower = texto.lower()
+
+    if ext == ".sql" or "insert into" in texto_lower:
+        datos = []
+        inserts = re.findall(r"insert into .*?values\s*\((.*?)\);", texto, re.IGNORECASE)
+
+        for ins in inserts:
+            partes = [p.strip().replace("'", "") for p in ins.split(",")]
+
+            if len(partes) >= 2:
+                datos.append(normalizar_item({
+                    "cliente": partes[0],
+                    "producto": partes[1],
+                    "monto": limpiar_numero(partes[-1]),
+                    "categoria": "SQL",
+                    "descripcion": "Registro SQL"
+                }))
+        return datos
+
+    if ext == ".json":
+        try:
+            data = json.loads(texto)
+            if isinstance(data, list):
+                return [normalizar_item(x) for x in data if isinstance(x, dict)]
+        except:
+            pass
+
+    if ext == ".csv":
+        try:
+            from io import StringIO
+            df = pd.read_csv(StringIO(texto))
+            return [normalizar_item(row.to_dict()) for _, row in df.iterrows()]
+        except:
+            pass
+
+    return []
 
 
 def item_valido(item):
@@ -355,13 +392,6 @@ def extraer_texto_simple(path):
 
 
 def extraer_texto_archivo(path, ext):
-    if ext == ".sql":
-        texto = extraer_texto_simple(path)
-        texto = "SQL FILE:\n" + texto
-
-    if ext == ".json":
-        texto = extraer_texto_simple(path)
-        texto = "JSON FILE:\n" + texto
     if ext == ".pdf":
         return extraer_texto_pdf(path)
 
@@ -370,9 +400,6 @@ def extraer_texto_archivo(path, ext):
 
     if ext in [".xlsx", ".xls"]:
         return extraer_texto_excel(path)
-
-    if ext in [".csv", ".sql", ".txt", ".json", ".xml", ".html", ".md"]:
-        return extraer_texto_simple(path)
 
     return extraer_texto_simple(path)
 
@@ -403,7 +430,11 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
             log(rid, f"{filename}: {len(contenido)} bytes")
 
             texto = extraer_texto_archivo(safe_name, ext)
-            texto_con_nombre = f"\n\n===== ARCHIVO: {filename} =====\n{texto}"
+            texto_con_nombre = {
+            "nombre": filename,
+            "texto": texto,
+            "ext": ext
+        }
 
             sesion["textos"].append(texto_con_nombre)
 
