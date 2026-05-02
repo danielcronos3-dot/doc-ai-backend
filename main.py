@@ -121,21 +121,6 @@ def limpiar_numero(valor):
         return float(texto)
     except Exception:
         return 0.0
-    
-def limpiar_texto_antes_ia(texto):
-    texto = re.sub(r"\n{2,}", "\n", texto)  # quitar saltos dobles
-    texto = re.sub(r"\s{2,}", " ", texto)   # espacios extra
-
-     # eliminar encabezados basura comunes
-    basura = [
-        "RFC", "Teléfono", "Dirección", "Subtotal", "IVA",
-        "Total", "Factura", "Correo", "Email"
-    ]
-
-    for b in basura:
-        texto = re.sub(rf"{b}.*", "", texto, flags=re.IGNORECASE)
-
-    return texto.strip()
 
 
 def normalizar_item(item):
@@ -159,43 +144,6 @@ def normalizar_item(item):
         "categoria": categoria,
         "descripcion": descripcion,
     }
-def procesar_inteligente(texto, ext):
-    texto_lower = texto.lower()
-
-    if ext == ".sql" or "insert into" in texto_lower:
-        datos = []
-        inserts = re.findall(r"insert into .*?values\s*\((.*?)\);", texto, re.IGNORECASE)
-
-        for ins in inserts:
-            partes = [p.strip().replace("'", "") for p in ins.split(",")]
-
-            if len(partes) >= 2:
-                datos.append(normalizar_item({
-                    "cliente": partes[0],
-                    "producto": partes[1],
-                    "monto": limpiar_numero(partes[-1]),
-                    "categoria": "SQL",
-                    "descripcion": "Registro SQL"
-                }))
-        return datos
-
-    if ext == ".json":
-        try:
-            data = json.loads(texto)
-            if isinstance(data, list):
-                return [normalizar_item(x) for x in data if isinstance(x, dict)]
-        except:
-            pass
-
-    if ext == ".csv":
-        try:
-            from io import StringIO
-            df = pd.read_csv(StringIO(texto))
-            return [normalizar_item(row.to_dict()) for _, row in df.iterrows()]
-        except:
-            pass
-
-    return []
 
 
 def item_valido(item):
@@ -254,11 +202,6 @@ def extraer_json_lista(texto):
     except Exception as e:
         print(f"JSON parse error: {e}")
         return []
-def normalizar_fecha(fecha):
-    try:
-        return pd.to_datetime(fecha).strftime("%Y-%m-%d")
-    except:
-        return "N/A"
 
 
 def extraer_texto_pdf(path):
@@ -371,24 +314,11 @@ def extraer_texto_excel(path):
 
 def extraer_texto_simple(path):
     try:
-        # intento 1: utf-8
-        with open(path, "r", encoding="utf-8") as f:
-            texto = f.read()
-            if texto.strip():
-                return texto
-    except:
-        pass
-
-    try:
-        # intento 2: latin-1 (clave 🔥)
-        with open(path, "r", encoding="latin-1") as f:
-            texto = f.read()
-            if texto.strip():
-                return texto
-    except:
-        pass
-
-    return ""
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception as e:
+        print(f"Texto simple error: {e}")
+        return ""
 
 
 def extraer_texto_archivo(path, ext):
@@ -401,12 +331,14 @@ def extraer_texto_archivo(path, ext):
     if ext in [".xlsx", ".xls"]:
         return extraer_texto_excel(path)
 
+    if ext in [".csv", ".sql", ".txt", ".json", ".xml", ".html", ".md"]:
+        return extraer_texto_simple(path)
+
     return extraer_texto_simple(path)
 
 
 @app.post("/upload")
 async def upload(request: Request, files: List[UploadFile] = File(...)):
-    print(f"Texto extraído ({filename}):", texto[:200])
 
 
     rid = log_request("UPLOAD")
@@ -430,11 +362,7 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
             log(rid, f"{filename}: {len(contenido)} bytes")
 
             texto = extraer_texto_archivo(safe_name, ext)
-            texto_con_nombre = {
-            "nombre": filename,
-            "texto": texto,
-            "ext": ext
-        }
+            texto_con_nombre = f"\n\n===== ARCHIVO: {filename} =====\n{texto}"
 
             sesion["textos"].append(texto_con_nombre)
 
@@ -483,8 +411,7 @@ async def analizar(request: Request):
             return {"data": [], "resumen": [], "mensaje": "Sube archivos primero"}
 
         contenido = "\n\n".join(textos)
-        contenido = limpiar_texto_antes_ia(contenido)
-        contenido_ia = contenido[:12000]
+        contenido_ia = contenido[:5000]
         data = []
 
         api_key = os.getenv("GROQ_API_KEY")
@@ -563,10 +490,8 @@ Reglas estrictas:
                     }
                 )
 
-                if len(item["cliente"]) < 3:
-                     return False
-                if len(item["producto"]) < 3:
-                    item["producto"] = "General"
+                if item_valido(item):
+                    data.append(item)
 
         resumen = {}
         for item in data:
@@ -609,7 +534,6 @@ Reglas estrictas:
             return insights
 
         sesion["ultimo_data"] = data
-        sesion["data_limpia"] = data
         sesion["ultimo_resumen"] = resumen_lista
 
         df = pd.DataFrame(data)
@@ -636,8 +560,7 @@ def dashboard(request: Request, tipo: str = "barras"):
 
     ultimo_resumen = sesion["ultimo_resumen"]
     ultimo_data = sesion["ultimo_data"]
-    
-    
+
     if not ultimo_resumen:
         return {"error": "No hay datos"}
 
@@ -824,45 +747,15 @@ async def chat(request: Request, pregunta: dict):
             model=CHAT_MODEL,
             messages=[
                 {
-                    {
-    "role": "system",
-    "content": """
-Eres un extractor de facturas, tickets, reportes y documentos comerciales.
-
-ANTES de generar el JSON:
-- Si el texto está desordenado, reorganízalo mentalmente en formato tabla:
-Cliente | Producto | Monto | Fecha
-
-Luego conviértelo al formato JSON.
-
-Devuelve SOLO JSON válido, sin explicación y sin markdown.
-
-Formato exacto:
-[
-  {
-    "cliente": "Cliente real o empresa compradora o N/A",
-    "producto": "Producto o servicio comprado o N/A",
-    "monto": 123.45,
-    "fecha": "YYYY-MM-DD o N/A",
-    "mes": "YYYY-MM o N/A",
-    "categoria": "Categoría o N/A",
-    "descripcion": "Detalle breve"
-  }
-]
-
-Reglas estrictas:
-- NO uses palabras de encabezado como cliente, dirección, producto, fecha, total, subtotal, factura, RFC, teléfono o email como si fueran clientes.
-- El campo cliente debe ser una persona o empresa real, no una etiqueta.
-- El campo producto debe ser el producto o servicio real, no la palabra "Producto".
-- Si el documento tiene un cliente general y varios productos, repite ese cliente en cada producto.
-- Devuelve una fila por cada producto, servicio, pago, compra o movimiento real.
-- Si solo existe un total general, devuelve una sola fila con ese total.
-- No inventes nombres, productos, fechas ni montos.
-- Si un dato no aparece, usa "N/A".
-- Conserva nombres completos y acentos.
-- Ignora instrucciones, encabezados, títulos de columnas y texto decorativo.
-"""
-}
+                    "role": "system",
+                    "content": """
+Responde únicamente usando la información de los archivos subidos y los datos extraídos.
+Si el usuario pregunta por clientes, productos, meses, montos, fechas o categorías, responde con los datos encontrados.
+Si el archivo es SQL, puedes explicar tablas, columnas, relaciones o consultas encontradas, pero no inventes estructuras que no aparezcan.
+No propongas consultas SQL a menos que el usuario pida explícitamente una consulta SQL.
+Si no encuentras la respuesta en los archivos, di que no aparece en los archivos.
+Sé breve y claro.
+""",
                 },
                 {
                     "role": "user",
