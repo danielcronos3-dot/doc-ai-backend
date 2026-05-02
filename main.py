@@ -406,7 +406,7 @@ def extraer_texto_archivo(path, ext):
 
 @app.post("/upload")
 async def upload(request: Request, files: List[UploadFile] = File(...)):
-    print(f"Texto extraído ({filename}):", texto[:200])
+    
 
 
     rid = log_request("UPLOAD")
@@ -430,6 +430,7 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
             log(rid, f"{filename}: {len(contenido)} bytes")
 
             texto = extraer_texto_archivo(safe_name, ext)
+            print(f"Texto extraído ({filename}):", texto[:200])
             texto_con_nombre = {
                 "nombre": filename,
                 "texto": texto,
@@ -470,7 +471,6 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
 
 @app.post("/analizar")
 async def analizar(request: Request):
-    
 
     rid = log_request("ANALIZAR")
     start = time.time()
@@ -479,95 +479,48 @@ async def analizar(request: Request):
     textos = sesion["textos"]
 
     try:
-        if not textos or not "\n".join(textos).strip():
+        # ✅ VALIDACIÓN CORRECTA
+        if not textos:
             return {"data": [], "resumen": [], "mensaje": "Sube archivos primero"}
 
-        contenido = "\n\n".join(textos)
-        contenido = limpiar_texto_antes_ia(contenido)
-        contenido_ia = contenido[:12000]
         data = []
 
-        api_key = os.getenv("GROQ_API_KEY")
+        for archivo in textos:
+            texto = limpiar_texto_antes_ia(archivo["texto"])
+            ext = archivo["ext"]
 
-        if api_key:
-            try:
-                client = Groq(api_key=api_key)
-                log(rid, f"consultando IA con {len(contenido_ia)} chars")
+            # 🔥 procesamiento inteligente
+            datos_directos = procesar_inteligente(texto, ext)
 
-                resp = client.chat.completions.create(
-                    model=EXTRACT_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": """
-Eres un extractor de facturas, tickets, reportes y documentos comerciales.
+            if datos_directos:
+                data.extend(datos_directos)
+                continue
 
-Devuelve SOLO JSON válido, sin explicación y sin markdown.
+            # 🤖 IA fallback
+            contenido_ia = texto[:12000]
 
-Formato exacto:
-[
-  {
-    "cliente": "Cliente real o empresa compradora o N/A",
-    "producto": "Producto o servicio comprado o N/A",
-    "monto": 123.45,
-    "fecha": "YYYY-MM-DD o N/A",
-    "mes": "YYYY-MM o N/A",
-    "categoria": "Categoría o N/A",
-    "descripcion": "Detalle breve"
-  }
-]
+            api_key = os.getenv("GROQ_API_KEY")
+            client = Groq(api_key=api_key) if api_key else None
 
-Reglas estrictas:
-- NO uses palabras de encabezado como cliente, dirección, producto, fecha, total, subtotal, factura, RFC, teléfono o email como si fueran clientes.
-- El campo cliente debe ser una persona o empresa real, no una etiqueta.
-- El campo producto debe ser el producto o servicio real, no la palabra "Producto".
-- Si el documento tiene un cliente general y varios productos, repite ese cliente en cada producto.
-- Devuelve una fila por cada producto, servicio, pago, compra o movimiento real.
-- Si solo existe un total general, devuelve una sola fila con ese total.
-- No inventes nombres, productos, fechas ni montos.
-- Si un dato no aparece, usa "N/A".
-- Conserva nombres completos y acentos.
-- Ignora instrucciones, encabezados, títulos de columnas y texto decorativo.
-""",
-                        },
-                        {"role": "user", "content": contenido_ia},
-                    ],
-                    temperature=0,
-                    max_tokens=700,
-                )
+            if client:
+                try:
+                    resp = client.chat.completions.create(
+                        model=EXTRACT_MODEL,
+                        messages=[
+                            {"role": "system", "content": "Extrae datos en JSON de facturas."},
+                            {"role": "user", "content": contenido_ia},
+                        ],
+                        temperature=0,
+                        max_tokens=500,
+                    )
 
-                texto_ia = resp.choices[0].message.content.strip()
-                print("IA RESPUESTA:", texto_ia[:2000])
-                data = extraer_json_lista(texto_ia)
+                    texto_ia = resp.choices[0].message.content.strip()
+                    data.extend(extraer_json_lista(texto_ia))
 
-            except Exception as e:
-                log(rid, f"IA ERROR: {e}")
+                except Exception as e:
+                    log(rid, f"IA ERROR: {e}")
 
-        if not data:
-            log(rid, "regex fallback")
-
-            patron = re.compile(
-                r"([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*)\s+\$?\s*([\d,]+(?:\.\d+)?)"
-            )
-
-            for cliente, monto in patron.findall(contenido):
-                item = normalizar_item(
-                    {
-                        "cliente": cliente.strip(),
-                        "producto": "N/A",
-                        "monto": monto,
-                        "fecha": "N/A",
-                        "mes": "N/A",
-                        "categoria": "N/A",
-                        "descripcion": "Extraído por regex",
-                    }
-                )
-
-                if len(item["cliente"]) < 3:
-                     continue
-                if len(item["producto"]) < 3:
-                    item["producto"] = "General"
-
+        # 🧠 RESUMEN (FUERA DEL LOOP)
         resumen = {}
         for item in data:
             cliente = item.get("cliente", "N/A")
@@ -575,6 +528,8 @@ Reglas estrictas:
             resumen[cliente] = resumen.get(cliente, 0) + monto
 
         resumen_lista = [{"cliente": k, "total": v} for k, v in resumen.items()]
+
+        # 📊 INSIGHTS
         def generar_insights(data, resumen):
             insights = []
 
@@ -583,7 +538,6 @@ Reglas estrictas:
 
             total = sum(r["total"] for r in resumen)
 
-            # 🔥 Cliente top
             top = max(resumen, key=lambda x: x["total"])
             porcentaje = (top["total"] / total) * 100 if total > 0 else 0
 
@@ -591,25 +545,12 @@ Reglas estrictas:
                 f"El cliente {top['cliente']} genera el {porcentaje:.1f}% de los ingresos"
             )
 
-            # 📈 Ventas por mes
-            por_mes = {}
-            for item in data:
-                mes = item.get("mes", "N/A")
-                monto = item.get("monto", 0)
-                por_mes[mes] = por_mes.get(mes, 0) + monto
-
-            if por_mes:
-                mejor_mes = max(por_mes, key=por_mes.get)
-                insights.append(f"El mes con más ingresos fue {mejor_mes}")
-
-            # ⚠️ Dependencia de clientes
-            if porcentaje > 50:
-                insights.append("Existe alta dependencia de un solo cliente")
-
             return insights
 
+        insights = generar_insights(data, resumen_lista)
+
+        # 💾 GUARDAR
         sesion["ultimo_data"] = data
-        sesion["data_limpia"] = data
         sesion["ultimo_resumen"] = resumen_lista
 
         df = pd.DataFrame(data)
@@ -617,13 +558,13 @@ Reglas estrictas:
 
         log(rid, f"registros: {len(data)}")
         log(rid, f"total {round(time.time() - start, 2)}s")
-        insights = generar_insights(data, resumen_lista)
 
         return {
             "data": data,
             "resumen": resumen_lista,
             "insights": insights,
         }
+
     except Exception as e:
         log(rid, f"ERROR ANALIZAR: {e}")
         return {"data": [], "resumen": [], "error": str(e)}
@@ -828,65 +769,35 @@ async def chat(request: Request, pregunta: dict):
 
             # 🤖 IA SOLO SI NECESARIO
             contenido_ia = texto[:12000]
+        
+            
+            contenido = "\n\n".join([a["texto"] for a in textos])
+            query = (pregunta or {}).get("mensaje", "")
+            contexto_archivo = construir_contexto_chat(contenido, query)
 
-        contexto_analisis = {
-            "registros_extraidos": ultimo_data[:10],
-            "resumen_por_cliente": ultimo_resumen[:10],
-        }
+            contexto_analisis = {
+                "registros_extraidos": ultimo_data[:10],
+                "resumen_por_cliente": ultimo_resumen[:10],
+            }
 
-        resp = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {
+            resp = client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=[
                     {
-    "role": "system",
-    "content": """
-Responde solo con datos reales del documento.
-
-ANTES de generar el JSON:
-- Si el texto está desordenado, reorganízalo mentalmente en formato tabla:
-Cliente | Producto | Monto | Fecha
-
-Luego conviértelo al formato JSON.
-
-Devuelve SOLO JSON válido, sin explicación y sin markdown.
-
-Formato exacto:
-[
-  {
-    "cliente": "Cliente real o empresa compradora o N/A",
-    "producto": "Producto o servicio comprado o N/A",
-    "monto": 123.45,
-    "fecha": "YYYY-MM-DD o N/A",
-    "mes": "YYYY-MM o N/A",
-    "categoria": "Categoría o N/A",
-    "descripcion": "Detalle breve"
-  }
-]
-
-Reglas estrictas:
-- NO uses palabras de encabezado como cliente, dirección, producto, fecha, total, subtotal, factura, RFC, teléfono o email como si fueran clientes.
-- El campo cliente debe ser una persona o empresa real, no una etiqueta.
-- El campo producto debe ser el producto o servicio real, no la palabra "Producto".
-- Si el documento tiene un cliente general y varios productos, repite ese cliente en cada producto.
-- Devuelve una fila por cada producto, servicio, pago, compra o movimiento real.
-- Si solo existe un total general, devuelve una sola fila con ese total.
-- No inventes nombres, productos, fechas ni montos.
-- Si un dato no aparece, usa "N/A".
-- Conserva nombres completos y acentos.
-- Ignora instrucciones, encabezados, títulos de columnas y texto decorativo.
-"""
-}
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"DATOS EXTRAÍDOS:\n{json.dumps(contexto_analisis, ensure_ascii=False)}"
-                        f"\n\nCONTENIDO RELEVANTE DE ARCHIVOS:\n{contexto_archivo}"
-                        f"\n\nPregunta: {query}"
+                        "role": "system",
+                        "content": "Responde solo con datos reales del documento."
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"DATOS EXTRAÍDOS:\n{json.dumps(contexto_analisis, ensure_ascii=False)}"
+                            f"\n\nCONTENIDO RELEVANTE DE ARCHIVOS:\n{contexto_archivo}"
+                            f"\n\nPregunta: {query}"
+                            
                     ),
                 },
             ],
+
             temperature=0,
             max_tokens=500,
         )
