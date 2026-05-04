@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "234179791299",
+    "project_id": "dashia-241f6",
+    "storage_bucket": "dashia-241f6.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:234179791299:android:6f740cff6475214c929576",
+        "android_client_info": {
+          "package_name": "com.cronos.dashboardapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "234179791299-e3p9r3nv7t33qh2qs78bj81edu6f19uv.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.cronos.dashboardapp",
+            "certificate_hash": "adbb93d3e57e4890834fc6fb80c58d4cc1fe2186"
+          }
+        },
+        {
+          "client_id": "234179791299-4tk6g90s3as3rvbbrmfg1vve1g7hik91.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAEuV2un3KQYQET2FsusrwqjW7VPguNu4U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "234179791299-4tk6g90s3as3rvbbrmfg1vve1g7hik91.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
