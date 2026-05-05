@@ -592,7 +592,11 @@ def generar_calidad_datos(data, resumen):
 
 
 @app.post("/upload")
-async def upload(request: Request, files: List[UploadFile] = File(...)):
+async def upload(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    append: bool = False,
+):
 
 
     rid = log_request("UPLOAD")
@@ -600,6 +604,13 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
     user_id = get_user_id(request)
     sesion = get_sesion(user_id)
 
+    if not append:
+        sesion["textos"] = []
+        sesion["data_preextraida"] = []
+        sesion["ultimo_data"] = []
+        sesion["ultimo_resumen"] = []
+        sesion["ultimo_insights"] = []
+        log(rid, f"user {user_id} memoria anterior eliminada antes de subir")
 
     try:
         previews = []
@@ -669,17 +680,17 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
 
 @app.post("/integraciones/api/upload")
 async def upload_api(request: Request, files: List[UploadFile] = File(...)):
-    return await upload(request, files)
+    return await upload(request, files, append=True)
 
 
 @app.post("/integraciones/correo")
 async def upload_correo(request: Request, files: List[UploadFile] = File(...)):
-    return await upload(request, files)
+    return await upload(request, files, append=True)
 
 
 @app.post("/integraciones/whatsapp")
 async def upload_whatsapp(request: Request, files: List[UploadFile] = File(...)):
-    return await upload(request, files)
+    return await upload(request, files, append=True)
 
 
 @app.post("/analizar")
