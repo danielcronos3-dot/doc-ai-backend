@@ -163,6 +163,7 @@ def normalizar_item(item):
     mes = str(item.get("mes", "N/A") or "N/A").strip()
     categoria = str(item.get("categoria", "N/A") or "N/A").strip()
     descripcion = str(item.get("descripcion", "N/A") or "N/A").strip()
+    archivo = str(item.get("archivo", "N/A") or "N/A").strip()
     monto = limpiar_numero(item.get("monto", 0))
 
     if mes == "N/A" and re.match(r"^\d{4}-\d{2}-\d{2}$", fecha):
@@ -176,6 +177,7 @@ def normalizar_item(item):
         "mes": mes,
         "categoria": categoria,
         "descripcion": descripcion,
+        "archivo": archivo,
     }
 
 
@@ -618,12 +620,16 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
             if ext == ".pdf":
                 data_pdf = extraer_data_pdf_tablas(safe_name)
                 if data_pdf:
+                    for item in data_pdf:
+                        item["archivo"] = filename
                     sesion.setdefault("data_preextraida", []).extend(data_pdf)
                     log(rid, f"{filename}: {len(data_pdf)} registros extraidos de tabla PDF")
 
             if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
                 data_img = extraer_data_imagen_vision(safe_name)
                 if data_img:
+                    for item in data_img:
+                        item["archivo"] = filename
                     sesion.setdefault("data_preextraida", []).extend(data_img)
                     log(rid, f"{filename}: {len(data_img)} registros extraidos por Vision")
 
