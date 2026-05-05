@@ -292,6 +292,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String tipoGrafica = "barras";
 
   bool comparacionActiva = false;
+  bool comparacionArchivosActiva = false;
   String tipoComparacion = "cliente";
   String comparacionA = "N/A";
   String comparacionB = "N/A";
@@ -486,7 +487,20 @@ Escribe aqui tu comentario:
     return ["Todos", ...meses];
   }
 
-  Future<void> subirArchivos(List<PlatformFile> files) async {
+  List<String> get archivosDisponibles {
+    final archivos = tabla
+        .map((e) => (e["archivo"] ?? "N/A").toString())
+        .where((e) => e.trim().isNotEmpty && e != "N/A")
+        .toSet()
+        .toList();
+    archivos.sort();
+    return archivos;
+  }
+
+  Future<void> subirArchivos(
+    List<PlatformFile> files, {
+    bool agregar = false,
+  }) async {
     setState(() {
       cargando = true;
       estadoArchivo = "Subiendo archivos...";
@@ -498,7 +512,7 @@ Escribe aqui tu comentario:
 
       final request = http.MultipartRequest(
         'POST',
-        Uri.parse('$baseUrl/upload'),
+        Uri.parse('$baseUrl/upload?append=${agregar ? "true" : "false"}'),
       );
 
       request.headers.addAll(await getUserHeaders());
@@ -604,6 +618,7 @@ Escribe aqui tu comentario:
           filtroCliente = "Todos";
           filtroMes = "Todos";
           comparacionActiva = false;
+          comparacionArchivosActiva = false;
 
           if (tabla.isEmpty) {
             estadoArchivo = data["mensaje"] ?? "No se encontraron datos";
@@ -628,7 +643,10 @@ Escribe aqui tu comentario:
     setState(() => cargando = false);
   }
 
-  Future<void> seleccionarArchivo() async {
+  Future<void> seleccionarArchivo({
+    bool reemplazar = true,
+    bool comparar = false,
+  }) async {
     print("ABRIENDO FILE PICKER");
 
     final result = await FilePicker.platform.pickFiles(
@@ -657,8 +675,15 @@ Escribe aqui tu comentario:
     print("FILE PICKER TERMINO");
 
     if (result == null || result.files.isEmpty) {
-      print("SE CANCELÓ EL PICKER");
-      setState(() => estadoArchivo = "Selección cancelada");
+      print("SE CANCELO EL PICKER");
+      setState(() => estadoArchivo = "Seleccion cancelada");
+      return;
+    }
+
+    if (comparar && result.files.length < 2) {
+      setState(
+        () => estadoArchivo = "Selecciona minimo 2 archivos para comparar",
+      );
       return;
     }
 
@@ -670,7 +695,13 @@ Escribe aqui tu comentario:
       print("Bytes: ${file.bytes?.length}");
     }
 
-    await subirArchivos(result.files);
+    if (reemplazar) {
+      await limpiarDatos(silencioso: true);
+    }
+
+    setState(() => comparacionArchivosActiva = comparar);
+
+    await subirArchivos(result.files, agregar: !reemplazar);
     await analizarDocumento();
   }
 
@@ -867,10 +898,12 @@ Solo incluye valores existentes si los conoces.
     setState(() => cargando = false);
   }
 
-  Future<void> limpiarDatos() async {
+  Future<void> limpiarDatos({bool silencioso = false}) async {
     setState(() {
       cargando = true;
-      estadoArchivo = "Limpiando datos...";
+      if (!silencioso) {
+        estadoArchivo = "Limpiando datos...";
+      }
     });
 
     try {
@@ -887,7 +920,10 @@ Solo incluye valores existentes si los conoces.
       filtroCliente = "Todos";
       filtroMes = "Todos";
       respuestaIA = "";
-      estadoArchivo = "Datos eliminados";
+      comparacionArchivosActiva = false;
+      estadoArchivo = silencioso
+          ? "Listo para nuevo archivo"
+          : "Datos eliminados";
       cargando = false;
     });
   }
@@ -2276,6 +2312,98 @@ Solo incluye valores existentes si los conoces.
     );
   }
 
+  Widget buildFileComparisonCard() {
+    if (!comparacionArchivosActiva || archivosDisponibles.length < 2) {
+      return const SizedBox.shrink();
+    }
+
+    final totalGeneral = tablaFiltrada.fold<double>(
+      0,
+      (sum, item) => sum + _monto(item["monto"]),
+    );
+
+    return Card(
+      color: panelColor,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.compare_arrows, color: biYellow),
+                const SizedBox(width: 8),
+                Text(
+                  "Comparacion de archivos",
+                  style: TextStyle(
+                    color: panelText,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ...archivosDisponibles.map((archivo) {
+              final rows = tablaFiltrada
+                  .where(
+                    (item) => (item["archivo"] ?? "N/A").toString() == archivo,
+                  )
+                  .toList();
+              final total = rows.fold<double>(
+                0,
+                (sum, item) => sum + _monto(item["monto"]),
+              );
+              final pct = totalGeneral <= 0
+                  ? 0.0
+                  : (total / totalGeneral).clamp(0.0, 1.0);
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            archivo,
+                            style: TextStyle(
+                              color: panelText,
+                              fontWeight: FontWeight.w700,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Text(
+                          "${rows.length} reg.  ${_money(total)}",
+                          style: TextStyle(color: softText, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        value: pct,
+                        minHeight: 9,
+                        backgroundColor: softText.withValues(alpha: 0.12),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          biYellow,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget buildMiniTutorialCard() {
     final steps = [
       {
@@ -2431,6 +2559,7 @@ Solo incluye valores existentes si los conoces.
         scrollDirection: Axis.horizontal,
         child: DataTable(
           columns: const [
+            DataColumn(label: Text("Archivo")),
             DataColumn(label: Text("Cliente")),
             DataColumn(label: Text("Producto")),
             DataColumn(label: Text("Monto")),
@@ -2442,6 +2571,7 @@ Solo incluye valores existentes si los conoces.
           rows: tablaFiltrada.map((item) {
             return DataRow(
               cells: [
+                DataCell(Text((item["archivo"] ?? "N/A").toString())),
                 DataCell(Text((item["cliente"] ?? "N/A").toString())),
                 DataCell(Text((item["producto"] ?? "N/A").toString())),
                 DataCell(Text("\$${item["monto"] ?? 0}")),
@@ -3222,7 +3352,23 @@ Solo incluye valores existentes si los conoces.
         const SizedBox(height: 16),
         buildAutomationSourcesCard(),
         const SizedBox(height: 16),
-        _mainButton("Subir archivo(s)", Icons.upload_file, seleccionarArchivo),
+        _mainButton(
+          "Subir nuevo archivo",
+          Icons.upload_file,
+          () => seleccionarArchivo(reemplazar: true),
+        ),
+        const SizedBox(height: 10),
+        _mainButton(
+          "Agregar mas archivos",
+          Icons.add_to_drive,
+          () => seleccionarArchivo(reemplazar: false),
+        ),
+        const SizedBox(height: 10),
+        _mainButton(
+          "Comparar archivos",
+          Icons.compare_arrows,
+          () => seleccionarArchivo(reemplazar: true, comparar: true),
+        ),
         const SizedBox(height: 10),
         _mainButton("Generar Dashboard", Icons.auto_graph, analizarDocumento),
         const SizedBox(height: 10),
@@ -3254,6 +3400,8 @@ Solo incluye valores existentes si los conoces.
         buildAsesorAutomaticoCard(),
         const SizedBox(height: 16),
         buildBusinessAlertsCard(),
+        const SizedBox(height: 16),
+        buildFileComparisonCard(),
         const SizedBox(height: 16),
         buildSavePanel(),
         const SizedBox(height: 16),
