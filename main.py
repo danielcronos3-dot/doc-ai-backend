@@ -11,6 +11,7 @@ import mimetypes
 import os
 import re
 import time
+import unicodedata
 import uuid
 import fitz
 
@@ -32,6 +33,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
+APP_VERSION = "pdf-table-extractor-2026-05-05-1"
 
 app = FastAPI()
 
@@ -110,6 +112,8 @@ def root():
         "extract_model": EXTRACT_MODEL,
         "chat_model": CHAT_MODEL,
         "auth_header": True,
+        "app_version": APP_VERSION,
+        "pdf_table_extractor": True,
     }
 
 
@@ -270,6 +274,78 @@ def extraer_texto_pdf(path):
             print(f"PDF Vision error: {e}")
 
     return texto
+
+
+def normalizar_header(valor):
+    texto = str(valor or "").strip().lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r"[^a-z0-9]+", "_", texto).strip("_")
+    return texto
+
+
+def buscar_columna(headers, opciones):
+    for opcion in opciones:
+        if opcion in headers:
+            return headers[opcion]
+    return None
+
+
+def extraer_data_pdf_tablas(path):
+    data = []
+
+    try:
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                for table in page.extract_tables() or []:
+                    if not table or len(table) < 2:
+                        continue
+
+                    raw_headers = table[0]
+                    headers = {
+                        normalizar_header(nombre): i
+                        for i, nombre in enumerate(raw_headers)
+                        if str(nombre or "").strip()
+                    }
+
+                    col_cliente = buscar_columna(headers, ["cliente", "nombre", "receptor"])
+                    col_producto = buscar_columna(headers, ["producto", "concepto", "servicio", "articulo"])
+                    col_categoria = buscar_columna(headers, ["categoria", "rubro", "tipo"])
+                    col_descripcion = buscar_columna(headers, ["descripcion", "detalle", "observacion"])
+                    col_monto = buscar_columna(headers, ["monto", "monto_$", "importe", "total", "precio"])
+                    col_fecha = buscar_columna(headers, ["fecha", "fecha_emision", "fecha_de_emision"])
+
+                    if col_monto is None or (col_cliente is None and col_producto is None):
+                        continue
+
+                    for row in table[1:]:
+                        if not row or not any(str(cell or "").strip() for cell in row):
+                            continue
+
+                        def cell(idx, default="N/A"):
+                            if idx is None or idx >= len(row):
+                                return default
+                            value = str(row[idx] or "").strip()
+                            return value if value else default
+
+                        item = normalizar_item(
+                            {
+                                "cliente": cell(col_cliente),
+                                "producto": cell(col_producto),
+                                "monto": cell(col_monto, 0),
+                                "fecha": cell(col_fecha),
+                                "mes": "N/A",
+                                "categoria": cell(col_categoria),
+                                "descripcion": cell(col_descripcion),
+                            }
+                        )
+
+                        if item_valido(item):
+                            data.append(item)
+    except Exception as e:
+        print(f"PDF tabla error: {e}")
+
+    return data
 
 
 def preparar_imagen_vision(path):
@@ -538,6 +614,12 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
             log(rid, f"{filename}: {len(contenido)} bytes")
 
             texto = extraer_texto_archivo(safe_name, ext)
+
+            if ext == ".pdf":
+                data_pdf = extraer_data_pdf_tablas(safe_name)
+                if data_pdf:
+                    sesion.setdefault("data_preextraida", []).extend(data_pdf)
+                    log(rid, f"{filename}: {len(data_pdf)} registros extraidos de tabla PDF")
 
             if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
                 data_img = extraer_data_imagen_vision(safe_name)
