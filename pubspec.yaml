@@ -39,6 +39,7 @@ dependencies:
 
   # 🌐 API
   http: ^1.6.0
+  pdf: ^3.11.3
 
   # 📊 Gráficas
   fl_chart: ^1.2.0
@@ -47,6 +48,7 @@ dependencies:
   firebase_core: ^2.27.0
   firebase_auth: ^4.17.0
   google_sign_in: ^6.2.1
+  shared_preferences: ^2.5.5
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.

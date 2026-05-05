@@ -17,6 +17,15 @@ import fitz
 import matplotlib.pyplot as plt
 import pandas as pd
 import pdfplumber
+from PIL import Image
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.pdfgen import canvas
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 load_dotenv()
 
@@ -52,16 +61,29 @@ def limpiar_user_id(user_id):
     return re.sub(r"[^A-Za-z0-9_-]", "_", user_id)
 
 
+def get_auth_token(request):
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth.replace("Bearer ", "", 1).strip()
+    return ""
+
+
 def get_user_id(request):
-    return limpiar_user_id(request.headers.get("X-User-Id", "anon"))
+    user_id = limpiar_user_id(request.headers.get("X-User-Id", "anon"))
+    token = get_auth_token(request)
+    if user_id == "anon" and token:
+        return limpiar_user_id(token[:24])
+    return user_id
 
 
 def get_sesion(user_id):
     if user_id not in sesiones:
         sesiones[user_id] = {
             "textos": [],
+            "data_preextraida": [],
             "ultimo_data": [],
             "ultimo_resumen": [],
+            "ultimo_insights": [],
         }
 
     return sesiones[user_id]
@@ -75,6 +97,10 @@ def grafica_path(user_id):
     return f"grafica_{user_id}.png"
 
 
+def pdf_path(user_id):
+    return f"reporte_{user_id}.pdf"
+
+
 @app.get("/")
 def root():
     return {
@@ -83,6 +109,7 @@ def root():
         "vision_model": VISION_MODEL,
         "extract_model": EXTRACT_MODEL,
         "chat_model": CHAT_MODEL,
+        "auth_header": True,
     }
 
 
@@ -92,11 +119,13 @@ async def reset(request: Request):
 
     sesiones[user_id] = {
         "textos": [],
+        "data_preextraida": [],
         "ultimo_data": [],
         "ultimo_resumen": [],
+        "ultimo_insights": [],
     }
 
-    for archivo in [reporte_path(user_id), grafica_path(user_id)]:
+    for archivo in [reporte_path(user_id), grafica_path(user_id), pdf_path(user_id)]:
         if os.path.exists(archivo):
             try:
                 os.remove(archivo)
@@ -243,22 +272,43 @@ def extraer_texto_pdf(path):
     return texto
 
 
+def preparar_imagen_vision(path):
+    try:
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((1800, 1800))
+
+        temp_path = f"vision_{uuid.uuid4().hex}.jpg"
+        img.save(temp_path, "JPEG", quality=85, optimize=True)
+        return temp_path, "image/jpeg", True
+    except Exception as e:
+        print(f"Preparar imagen Vision error: {e}")
+        mime_type, _ = mimetypes.guess_type(path)
+        return path, mime_type or "image/jpeg", False
+
+
+def leer_imagen_base64(path):
+    vision_path, mime_type, borrar = preparar_imagen_vision(path)
+
+    try:
+        with open(vision_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+
+        return base64_image, mime_type
+    finally:
+        if borrar:
+            try:
+                os.remove(vision_path)
+            except Exception:
+                pass
+
+
 def extraer_texto_imagen(path):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return ""
 
     try:
-        if os.path.getsize(path) > 4 * 1024 * 1024:
-            return "Imagen demasiado grande para procesar con Vision."
-
-        mime_type, _ = mimetypes.guess_type(path)
-        if not mime_type:
-            mime_type = "image/jpeg"
-
-        with open(path, "rb") as image_file:
-            base64_image = base64.b64encode(image_file.read()).decode("utf-8")
-
+        base64_image, mime_type = leer_imagen_base64(path)
         client = Groq(api_key=api_key)
 
         resp = client.chat.completions.create(
@@ -294,6 +344,72 @@ Devuelve solo texto plano.
     except Exception as e:
         print(f"Vision imagen error: {e}")
         return ""
+
+
+def extraer_data_imagen_vision(path):
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return []
+
+    try:
+        base64_image, mime_type = leer_imagen_base64(path)
+        client = Groq(api_key=api_key)
+
+        resp = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": """
+Eres un extractor de facturas, tickets y documentos comerciales en imagen.
+
+Devuelve SOLO JSON valido, sin markdown y sin explicacion.
+
+Formato:
+[
+  {
+    "cliente": "cliente comprador/receptor o emisor si no hay receptor",
+    "producto": "producto o servicio real",
+    "monto": 123.45,
+    "fecha": "YYYY-MM-DD o N/A",
+    "mes": "YYYY-MM o N/A",
+    "categoria": "categoria comercial o N/A",
+    "descripcion": "detalle breve"
+  }
+]
+
+Reglas:
+- Una fila por cada partida, producto o servicio de la tabla.
+- Si hay receptor/cliente, usalo como cliente en todas las partidas.
+- monto es el importe de la partida, no subtotal, IVA ni total, salvo que no existan partidas.
+- Convierte fechas al formato YYYY-MM-DD cuando sea posible.
+- No uses encabezados como cliente, factura, subtotal, total, RFC o descripcion como datos.
+- No inventes datos. Si algo no aparece, usa N/A.
+""",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{base64_image}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            temperature=0,
+            max_completion_tokens=1500,
+        )
+
+        texto_ia = resp.choices[0].message.content.strip()
+        print("VISION JSON:", texto_ia[:2000])
+        return extraer_json_lista(texto_ia)
+
+    except Exception as e:
+        print(f"Vision data error: {e}")
+        return []
 
 
 def extraer_texto_excel(path):
@@ -337,6 +453,66 @@ def extraer_texto_archivo(path, ext):
     return extraer_texto_simple(path)
 
 
+def generar_calidad_datos(data, resumen):
+    advertencias = []
+    vistos = set()
+    duplicados = 0
+    sin_fecha = 0
+    montos = []
+
+    for item in data:
+        cliente = str(item.get("cliente", "N/A")).strip().lower()
+        producto = str(item.get("producto", "N/A")).strip().lower()
+        fecha = str(item.get("fecha", "N/A")).strip()
+        monto = limpiar_numero(item.get("monto", 0))
+
+        key = f"{cliente}|{producto}|{monto:.2f}|{fecha}"
+        if key in vistos:
+            duplicados += 1
+        vistos.add(key)
+
+        if not fecha or fecha == "N/A":
+            sin_fecha += 1
+
+        if monto > 0:
+            montos.append(monto)
+
+    promedio = sum(montos) / len(montos) if montos else 0
+    sospechosos = [
+        monto for monto in montos
+        if promedio > 0 and monto > promedio * 3 and monto > 1000
+    ]
+
+    total = sum(limpiar_numero(item.get("total", 0)) for item in resumen)
+    cliente_top = None
+    concentracion = 0
+    if resumen and total > 0:
+        cliente_top = max(resumen, key=lambda item: limpiar_numero(item.get("total", 0)))
+        concentracion = (limpiar_numero(cliente_top.get("total", 0)) / total) * 100
+
+    if duplicados:
+        advertencias.append(f"{duplicados} registros parecen duplicados")
+    if sospechosos:
+        advertencias.append(f"{len(sospechosos)} montos se salen del patron normal")
+    if sin_fecha:
+        advertencias.append(f"{sin_fecha} registros no tienen fecha clara")
+    if concentracion >= 60 and cliente_top:
+        advertencias.append(f"Cliente dominante: {cliente_top.get('cliente', 'N/A')} concentra {concentracion:.1f}%")
+    if not advertencias:
+        advertencias.append("Sin errores criticos detectados")
+
+    return {
+        "registros": len(data),
+        "clientes_detectados": len(resumen),
+        "monto_total": total,
+        "duplicados": duplicados,
+        "posible_fraude": len(sospechosos),
+        "errores_datos": sin_fecha,
+        "concentracion_cliente_top": round(concentracion, 2),
+        "advertencias": advertencias,
+    }
+
+
 @app.post("/upload")
 async def upload(request: Request, files: List[UploadFile] = File(...)):
 
@@ -362,6 +538,13 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
             log(rid, f"{filename}: {len(contenido)} bytes")
 
             texto = extraer_texto_archivo(safe_name, ext)
+
+            if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
+                data_img = extraer_data_imagen_vision(safe_name)
+                if data_img:
+                    sesion.setdefault("data_preextraida", []).extend(data_img)
+                    log(rid, f"{filename}: {len(data_img)} registros extraidos por Vision")
+
             texto_con_nombre = f"\n\n===== ARCHIVO: {filename} =====\n{texto}"
 
             sesion["textos"].append(texto_con_nombre)
@@ -396,6 +579,21 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
         return {"mensaje": "ERROR", "error": str(e)}
 
 
+@app.post("/integraciones/api/upload")
+async def upload_api(request: Request, files: List[UploadFile] = File(...)):
+    return await upload(request, files)
+
+
+@app.post("/integraciones/correo")
+async def upload_correo(request: Request, files: List[UploadFile] = File(...)):
+    return await upload(request, files)
+
+
+@app.post("/integraciones/whatsapp")
+async def upload_whatsapp(request: Request, files: List[UploadFile] = File(...)):
+    return await upload(request, files)
+
+
 @app.post("/analizar")
 async def analizar(request: Request):
     
@@ -407,16 +605,17 @@ async def analizar(request: Request):
     textos = sesion["textos"]
 
     try:
-        if not textos or not "\n".join(textos).strip():
+        data = list(sesion.get("data_preextraida", []))
+
+        if not data and (not textos or not "\n".join(textos).strip()):
             return {"data": [], "resumen": [], "mensaje": "Sube archivos primero"}
 
         contenido = "\n\n".join(textos)
         contenido_ia = contenido[:5000]
-        data = []
 
         api_key = os.getenv("GROQ_API_KEY")
 
-        if api_key:
+        if api_key and not data:
             try:
                 client = Groq(api_key=api_key)
                 log(rid, f"consultando IA con {len(contenido_ia)} chars")
@@ -542,15 +741,177 @@ Reglas estrictas:
         log(rid, f"registros: {len(data)}")
         log(rid, f"total {round(time.time() - start, 2)}s")
         insights = generar_insights(data, resumen_lista)
+        calidad = generar_calidad_datos(data, resumen_lista)
+        sesion["ultimo_insights"] = insights
 
         return {
             "data": data,
             "resumen": resumen_lista,
             "insights": insights,
+            "calidad": calidad,
         }
     except Exception as e:
         log(rid, f"ERROR ANALIZAR: {e}")
         return {"data": [], "resumen": [], "error": str(e)}
+
+
+class PDFConLogo(SimpleDocTemplate):
+    def __init__(self, filename, titulo="NexaDash AI", **kwargs):
+        super().__init__(filename, **kwargs)
+        self.titulo = titulo
+
+
+def dibujar_logo_pdf(c: canvas.Canvas, doc):
+    c.saveState()
+    width, height = letter
+
+    c.setFillColor(colors.HexColor("#10172A"))
+    c.rect(0, height - 78, width, 78, fill=1, stroke=0)
+
+    c.setFillColor(colors.HexColor("#B84DFF"))
+    c.roundRect(44, height - 55, 34, 34, 8, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 15)
+    c.drawCentredString(61, height - 45, "ND")
+
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(88, height - 38, "NexaDash AI")
+    c.setFillColor(colors.HexColor("#8BE9FD"))
+    c.setFont("Helvetica", 9)
+    c.drawString(88, height - 53, "Documentos convertidos en dashboards inteligentes")
+
+    c.setFillColor(colors.HexColor("#CBD5E1"))
+    c.setFont("Helvetica", 8)
+    c.drawRightString(width - 44, height - 35, time.strftime("%Y-%m-%d %H:%M"))
+
+    c.setFillColor(colors.HexColor("#64748B"))
+    c.setFont("Helvetica", 8)
+    c.drawCentredString(width / 2, 28, f"NexaDash AI | Pagina {doc.page}")
+    c.restoreState()
+
+
+def formato_moneda(valor):
+    return f"${limpiar_numero(valor):,.2f}"
+
+
+def crear_pdf_reporte(path, user_id, data, resumen, insights):
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="Muted",
+        parent=styles["Normal"],
+        textColor=colors.HexColor("#64748B"),
+        fontSize=9,
+        leading=12,
+    ))
+    styles.add(ParagraphStyle(
+        name="RightSmall",
+        parent=styles["Normal"],
+        alignment=TA_RIGHT,
+        fontSize=8,
+        textColor=colors.HexColor("#64748B"),
+    ))
+
+    doc = PDFConLogo(
+        path,
+        pagesize=letter,
+        rightMargin=44,
+        leftMargin=44,
+        topMargin=104,
+        bottomMargin=54,
+    )
+
+    story = []
+    total = sum(limpiar_numero(item.get("total", 0)) for item in resumen)
+    clientes = len(resumen)
+    registros = len(data)
+
+    story.append(Paragraph("Resumen ejecutivo", styles["Title"]))
+    story.append(Paragraph(
+        "Analisis generado automaticamente a partir de los documentos cargados.",
+        styles["Muted"],
+    ))
+    story.append(Spacer(1, 0.18 * inch))
+
+    kpis = Table(
+        [
+            ["Monto total", "Clientes", "Registros"],
+            [formato_moneda(total), str(clientes), str(registros)],
+        ],
+        colWidths=[2.05 * inch, 2.05 * inch, 2.05 * inch],
+    )
+    kpis.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10172A")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#F8FAFC")),
+        ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor("#111827")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 1), (-1, 1), 15),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#CBD5E1")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+        ("TOPPADDING", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+    ]))
+    story.append(kpis)
+    story.append(Spacer(1, 0.24 * inch))
+
+    if insights:
+        story.append(Paragraph("Insights clave", styles["Heading2"]))
+        for item in insights[:6]:
+            story.append(Paragraph(f"- {item}", styles["Normal"]))
+        story.append(Spacer(1, 0.18 * inch))
+
+    if resumen:
+        story.append(Paragraph("Resumen por cliente", styles["Heading2"]))
+        tabla_resumen = [["Cliente", "Total"]]
+        for item in sorted(resumen, key=lambda x: limpiar_numero(x.get("total", 0)), reverse=True)[:12]:
+            tabla_resumen.append([
+                str(item.get("cliente", "N/A"))[:42],
+                formato_moneda(item.get("total", 0)),
+            ])
+
+        table = Table(tabla_resumen, colWidths=[4.4 * inch, 1.8 * inch])
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E293B")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E2E8F0")),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 0.22 * inch))
+
+    if data:
+        story.append(Paragraph("Detalle de registros", styles["Heading2"]))
+        detalle = [["Cliente", "Producto", "Monto", "Fecha"]]
+        for item in data[:18]:
+            detalle.append([
+                str(item.get("cliente", "N/A"))[:24],
+                str(item.get("producto", "N/A"))[:24],
+                formato_moneda(item.get("monto", 0)),
+                str(item.get("fecha", "N/A"))[:14],
+            ])
+
+        detail_table = Table(detalle, colWidths=[1.75 * inch, 1.8 * inch, 1.25 * inch, 1.25 * inch])
+        detail_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#B84DFF")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(detail_table)
+
+    doc.build(story, onFirstPage=dibujar_logo_pdf, onLaterPages=dibujar_logo_pdf)
 
 
 @app.get("/descargar-dashboard")
@@ -686,6 +1047,27 @@ def excel(request: Request):
     )
 
 
+@app.get("/descargar-pdf")
+def descargar_pdf(request: Request):
+    user_id = get_user_id(request)
+    sesion = get_sesion(user_id)
+    data = sesion.get("ultimo_data", [])
+    resumen = sesion.get("ultimo_resumen", [])
+    insights = sesion.get("ultimo_insights", [])
+
+    if not data or not resumen:
+        return {"error": "No hay dashboard para exportar"}
+
+    path = pdf_path(user_id)
+    crear_pdf_reporte(path, user_id, data, resumen, insights)
+
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename="reporte_nexadash_ai.pdf",
+    )
+
+
 def construir_contexto_chat(contenido, query, limite=1200):
     palabras = [
         p.lower()
@@ -713,19 +1095,26 @@ def construir_contexto_chat(contenido, query, limite=1200):
 
 @app.post("/chat")
 async def chat(request: Request, pregunta: dict):
-    
-
     rid = log_request("CHAT")
     user_id = get_user_id(request)
     sesion = get_sesion(user_id)
 
-    textos = sesion["textos"]
-    ultimo_data = sesion["ultimo_data"]
-    ultimo_resumen = sesion["ultimo_resumen"]
+    dashboard = (pregunta or {}).get("dashboard") or {}
+    dashboard_data = dashboard.get("data") or []
+    dashboard_resumen = dashboard.get("resumen") or []
+    dashboard_insights = dashboard.get("insights") or []
+    dashboard_calidad = dashboard.get("calidad") or {}
+
+    textos = sesion.get("textos", [])
+    ultimo_data = dashboard_data or sesion.get("ultimo_data", [])
+    ultimo_resumen = dashboard_resumen or sesion.get("ultimo_resumen", [])
 
     try:
-        if not textos or not "\n".join(textos).strip():
-            return {"respuesta": "Sube archivos primero"}
+        hay_textos = bool(textos and "\n".join(textos).strip())
+        hay_dashboard = bool(ultimo_data or ultimo_resumen)
+
+        if not hay_textos and not hay_dashboard:
+            return {"respuesta": "Sube un archivo o abre un reporte guardado primero"}
 
         api_key = os.getenv("GROQ_API_KEY")
 
@@ -734,13 +1123,16 @@ async def chat(request: Request, pregunta: dict):
 
         client = Groq(api_key=api_key)
 
-        contenido = "\n\n".join(textos)
+        contenido = "\n\n".join(textos) if hay_textos else ""
         query = (pregunta or {}).get("mensaje", "")
-        contexto_archivo = construir_contexto_chat(contenido, query)
+        contexto_archivo = construir_contexto_chat(contenido, query) if contenido else "Reporte cargado desde historial local."
 
         contexto_analisis = {
-            "registros_extraidos": ultimo_data[:10],
-            "resumen_por_cliente": ultimo_resumen[:10],
+            "registros_extraidos": ultimo_data[:25],
+            "resumen_por_cliente": ultimo_resumen[:25],
+            "insights": dashboard_insights[:10],
+            "calidad": dashboard_calidad,
+            "total_registros": len(ultimo_data),
         }
 
         resp = client.chat.completions.create(
@@ -749,25 +1141,35 @@ async def chat(request: Request, pregunta: dict):
                 {
                     "role": "system",
                     "content": """
-Responde únicamente usando la información de los archivos subidos y los datos extraídos.
-Si el usuario pregunta por clientes, productos, meses, montos, fechas o categorías, responde con los datos encontrados.
-Si el archivo es SQL, puedes explicar tablas, columnas, relaciones o consultas encontradas, pero no inventes estructuras que no aparezcan.
-No propongas consultas SQL a menos que el usuario pida explícitamente una consulta SQL.
-Si no encuentras la respuesta en los archivos, di que no aparece en los archivos.
-Sé breve y claro.
+Eres el asesor ejecutivo de NexaDash AI.
+Tu trabajo es convertir documentos y dashboards guardados en decisiones claras.
+
+Reglas:
+- Usa unicamente la informacion de los archivos subidos, el dashboard actual o el reporte guardado recibido.
+- No inventes clientes, montos, fechas, productos, columnas ni conclusiones.
+- Si un dato no aparece, dilo claramente.
+- Responde en espanol profesional, breve y vendible.
+- Prioriza hallazgos, evidencia, riesgos/oportunidades y acciones concretas.
+- Si el usuario pide cambiar el dashboard, puedes responder normalmente y conservar cualquier JSON de control que venga en la pregunta.
+
+Formato recomendado cuando aplique:
+1. Hallazgo principal
+2. Evidencia
+3. Riesgo u oportunidad
+4. Accion recomendada
 """,
                 },
                 {
                     "role": "user",
                     "content": (
-                        f"DATOS EXTRAÍDOS:\n{json.dumps(contexto_analisis, ensure_ascii=False)}"
-                        f"\n\nCONTENIDO RELEVANTE DE ARCHIVOS:\n{contexto_archivo}"
+                        f"DATOS DEL DASHBOARD O ARCHIVO:\n{json.dumps(contexto_analisis, ensure_ascii=False)}"
+                        f"\n\nCONTENIDO RELEVANTE:\n{contexto_archivo}"
                         f"\n\nPregunta: {query}"
                     ),
                 },
             ],
-            temperature=0,
-            max_tokens=500,
+            temperature=0.2,
+            max_tokens=900,
         )
 
         return {"respuesta": resp.choices[0].message.content}
