@@ -33,7 +33,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-3"
+APP_VERSION = "pdf-table-extractor-2026-05-05-4"
 
 app = FastAPI()
 
@@ -156,6 +156,22 @@ def limpiar_numero(valor):
         return 0.0
 
 
+def extraer_mes_fecha(fecha):
+    texto = str(fecha or "").strip()
+    if not texto or texto == "N/A":
+        return "N/A"
+
+    match = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$", texto)
+    if match:
+        return f"{match.group(1)}-{match.group(2).zfill(2)}"
+
+    match = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", texto)
+    if match:
+        return f"{match.group(3)}-{match.group(2).zfill(2)}"
+
+    return "N/A"
+
+
 def normalizar_item(item):
     cliente = str(item.get("cliente", "N/A") or "N/A").strip()
     producto = str(item.get("producto", "N/A") or "N/A").strip()
@@ -166,8 +182,8 @@ def normalizar_item(item):
     archivo = str(item.get("archivo", "N/A") or "N/A").strip()
     monto = limpiar_numero(item.get("monto", 0))
 
-    if mes == "N/A" and re.match(r"^\d{4}-\d{2}-\d{2}$", fecha):
-        mes = fecha[:7]
+    if mes == "N/A":
+        mes = extraer_mes_fecha(fecha)
 
     return {
         "cliente": cliente,
