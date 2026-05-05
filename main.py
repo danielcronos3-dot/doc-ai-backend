@@ -33,7 +33,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-1"
+APP_VERSION = "pdf-table-extractor-2026-05-05-2"
 
 app = FastAPI()
 
@@ -350,6 +350,71 @@ def extraer_data_pdf_tablas(path):
     return data
 
 
+def extraer_data_pdf_texto(path):
+    data = []
+
+    try:
+        texto = ""
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                texto += (page.extract_text(x_tolerance=1, y_tolerance=3) or "") + "\n"
+
+        lineas = [linea.strip() for linea in texto.splitlines() if linea.strip()]
+
+        patron_cliente_total_fecha = re.compile(
+            r"^(?P<cliente>.+?)\s+\$?(?P<monto>[\d,]+(?:\.\d+)?)\s+(?P<fecha>\d{4}-\d{2}-\d{2})$"
+        )
+        patron_producto_factura = re.compile(
+            r"^(?P<cliente>Cliente\s+\d+|[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){0,3})\s+"
+            r"(?P<producto>Laptop|Tablet|Mouse|Teclado|Impresora|Monitor|Memoria|Servicio|Licencia|Soporte)\s+"
+            r"(?P<categoria>\S+)\s+"
+            r"(?P<descripcion>.+?)\s+"
+            r"\$?(?P<monto>[\d,]+(?:\.\d+)?)\s+"
+            r"(?P<fecha>\d{4}-\d{2}-\d{2})$",
+            re.IGNORECASE,
+        )
+
+        encabezados = {
+            "cliente total fecha",
+            "fecha cliente",
+            "cliente producto monto fecha mes categoria descripcion",
+        }
+
+        for linea in lineas:
+            limpia = normalizar_header(linea).replace("_", " ")
+            if limpia in encabezados:
+                continue
+
+            match = patron_producto_factura.match(linea)
+            if match:
+                item = normalizar_item(match.groupdict())
+                item["descripcion"] = match.group("descripcion").strip()
+                if item_valido(item):
+                    data.append(item)
+                continue
+
+            match = patron_cliente_total_fecha.match(linea)
+            if match:
+                item = normalizar_item(
+                    {
+                        "cliente": match.group("cliente").strip(),
+                        "producto": "N/A",
+                        "monto": match.group("monto"),
+                        "fecha": match.group("fecha"),
+                        "mes": "N/A",
+                        "categoria": "N/A",
+                        "descripcion": "Extraido por texto PDF",
+                    }
+                )
+                if item_valido(item):
+                    data.append(item)
+
+    except Exception as e:
+        print(f"PDF texto estructurado error: {e}")
+
+    return data
+
+
 def preparar_imagen_vision(path):
     try:
         img = Image.open(path).convert("RGB")
@@ -630,11 +695,13 @@ async def upload(
 
             if ext == ".pdf":
                 data_pdf = extraer_data_pdf_tablas(safe_name)
+                if not data_pdf:
+                    data_pdf = extraer_data_pdf_texto(safe_name)
                 if data_pdf:
                     for item in data_pdf:
                         item["archivo"] = filename
                     sesion.setdefault("data_preextraida", []).extend(data_pdf)
-                    log(rid, f"{filename}: {len(data_pdf)} registros extraidos de tabla PDF")
+                    log(rid, f"{filename}: {len(data_pdf)} registros extraidos de PDF")
 
             if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
                 data_img = extraer_data_imagen_vision(safe_name)
