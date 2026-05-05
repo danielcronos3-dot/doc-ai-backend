@@ -33,7 +33,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-2"
+APP_VERSION = "pdf-table-extractor-2026-05-05-3"
 
 app = FastAPI()
 
@@ -415,6 +415,94 @@ def extraer_data_pdf_texto(path):
     return data
 
 
+def extraer_data_dataframe(df, archivo="N/A"):
+    data = []
+
+    if df is None or df.empty:
+        return data
+
+    df = df.copy()
+    df.columns = [str(col).strip() for col in df.columns]
+    headers = {normalizar_header(col): col for col in df.columns}
+
+    col_cliente = buscar_columna(
+        headers,
+        ["cliente", "nombre", "receptor", "empresa", "customer", "client"],
+    )
+    col_producto = buscar_columna(
+        headers,
+        ["producto", "concepto", "servicio", "articulo", "descripcion", "item"],
+    )
+    col_categoria = buscar_columna(headers, ["categoria", "rubro", "tipo"])
+    col_descripcion = buscar_columna(headers, ["descripcion", "detalle", "nota"])
+    col_monto = buscar_columna(
+        headers,
+        ["monto", "importe", "total", "precio", "valor", "venta", "amount"],
+    )
+    col_fecha = buscar_columna(
+        headers,
+        ["fecha", "fecha_emision", "fecha_de_emision", "date"],
+    )
+
+    if col_monto is None or (col_cliente is None and col_producto is None):
+        return data
+
+    for _, row in df.iterrows():
+        def cell(col, default="N/A"):
+            if col is None:
+                return default
+            value = row.get(col, default)
+            if pd.isna(value):
+                return default
+            if hasattr(value, "strftime"):
+                return value.strftime("%Y-%m-%d")
+            text = str(value).strip()
+            return text if text else default
+
+        item = normalizar_item(
+            {
+                "cliente": cell(col_cliente),
+                "producto": cell(col_producto),
+                "monto": cell(col_monto, 0),
+                "fecha": cell(col_fecha),
+                "mes": "N/A",
+                "categoria": cell(col_categoria),
+                "descripcion": cell(col_descripcion),
+                "archivo": archivo,
+            }
+        )
+
+        if item_valido(item):
+            data.append(item)
+
+    return data
+
+
+def extraer_data_archivo_tabular(path, ext, archivo="N/A"):
+    data = []
+
+    try:
+        if ext == ".csv":
+            for sep in [",", ";", "\t", "|"]:
+                try:
+                    df = pd.read_csv(path, sep=sep)
+                    data = extraer_data_dataframe(df, archivo)
+                    if data:
+                        return data
+                except Exception:
+                    continue
+
+        if ext in [".xlsx", ".xls"]:
+            hojas = pd.read_excel(path, sheet_name=None)
+            for _, df in hojas.items():
+                data.extend(extraer_data_dataframe(df, archivo))
+
+    except Exception as e:
+        print(f"Archivo tabular error: {e}")
+
+    return data
+
+
 def preparar_imagen_vision(path):
     try:
         img = Image.open(path).convert("RGB")
@@ -530,6 +618,8 @@ Reglas:
 - monto es el importe de la partida, no subtotal, IVA ni total, salvo que no existan partidas.
 - Convierte fechas al formato YYYY-MM-DD cuando sea posible.
 - No uses encabezados como cliente, factura, subtotal, total, RFC o descripcion como datos.
+- Si ves una tabla con columnas, respeta cada columna y no mezcles producto con cliente.
+- Si hay folio, RFC o direccion, usalos solo en descripcion cuando ayuden; no los pongas como producto.
 - No inventes datos. Si algo no aparece, usa N/A.
 """,
                         },
@@ -702,6 +792,12 @@ async def upload(
                         item["archivo"] = filename
                     sesion.setdefault("data_preextraida", []).extend(data_pdf)
                     log(rid, f"{filename}: {len(data_pdf)} registros extraidos de PDF")
+
+            if ext in [".xlsx", ".xls", ".csv"]:
+                data_tabular = extraer_data_archivo_tabular(safe_name, ext, filename)
+                if data_tabular:
+                    sesion.setdefault("data_preextraida", []).extend(data_tabular)
+                    log(rid, f"{filename}: {len(data_tabular)} registros extraidos de tabla")
 
             if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
                 data_img = extraer_data_imagen_vision(safe_name)
@@ -1319,10 +1415,13 @@ Reglas:
 - Si el usuario pide cambiar el dashboard, puedes responder normalmente y conservar cualquier JSON de control que venga en la pregunta.
 
 Formato recomendado cuando aplique:
-1. Hallazgo principal
-2. Evidencia
+1. Diagnostico breve
+2. Evidencia concreta con dato
 3. Riesgo u oportunidad
-4. Accion recomendada
+4. Checklist accionable con prioridad Alta, Media o Baja
+5. Siguiente paso operativo
+
+Si calidad contiene duplicados, posible_fraude o errores_datos mayores a cero, marca la respuesta como modo auditor y explica que validar primero.
 """,
                 },
                 {
