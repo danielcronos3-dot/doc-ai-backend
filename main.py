@@ -33,7 +33,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-4"
+APP_VERSION = "pdf-table-extractor-2026-05-05-5"
 
 app = FastAPI()
 
@@ -172,6 +172,46 @@ def extraer_mes_fecha(fecha):
     return "N/A"
 
 
+def normalizar_mes_texto(mes, fecha="N/A"):
+    texto = str(mes or "").strip()
+    if not texto or texto == "N/A":
+        return extraer_mes_fecha(fecha)
+
+    normal = (
+        unicodedata.normalize("NFKD", texto.lower())
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    meses = {
+        "enero": "01",
+        "febrero": "02",
+        "marzo": "03",
+        "abril": "04",
+        "mayo": "05",
+        "junio": "06",
+        "julio": "07",
+        "agosto": "08",
+        "septiembre": "09",
+        "setiembre": "09",
+        "octubre": "10",
+        "noviembre": "11",
+        "diciembre": "12",
+    }
+
+    if normal in meses:
+        mes_fecha = extraer_mes_fecha(fecha)
+        if mes_fecha != "N/A":
+            return f"{mes_fecha[:4]}-{meses[normal]}"
+        return texto[:1].upper() + texto[1:]
+
+    if re.match(r"^(0?[1-9]|1[0-2])$", texto):
+        mes_fecha = extraer_mes_fecha(fecha)
+        if mes_fecha != "N/A":
+            return f"{mes_fecha[:4]}-{texto.zfill(2)}"
+
+    return texto
+
+
 def normalizar_item(item):
     cliente = str(item.get("cliente", "N/A") or "N/A").strip()
     producto = str(item.get("producto", "N/A") or "N/A").strip()
@@ -182,8 +222,7 @@ def normalizar_item(item):
     archivo = str(item.get("archivo", "N/A") or "N/A").strip()
     monto = limpiar_numero(item.get("monto", 0))
 
-    if mes == "N/A":
-        mes = extraer_mes_fecha(fecha)
+    mes = normalizar_mes_texto(mes, fecha)
 
     return {
         "cliente": cliente,
@@ -332,6 +371,7 @@ def extraer_data_pdf_tablas(path):
                     col_descripcion = buscar_columna(headers, ["descripcion", "detalle", "observacion"])
                     col_monto = buscar_columna(headers, ["monto", "monto_$", "importe", "total", "precio"])
                     col_fecha = buscar_columna(headers, ["fecha", "fecha_emision", "fecha_de_emision"])
+                    col_mes = buscar_columna(headers, ["mes", "month"])
 
                     if col_monto is None or (col_cliente is None and col_producto is None):
                         continue
@@ -352,7 +392,7 @@ def extraer_data_pdf_tablas(path):
                                 "producto": cell(col_producto),
                                 "monto": cell(col_monto, 0),
                                 "fecha": cell(col_fecha),
-                                "mes": "N/A",
+                                "mes": cell(col_mes),
                                 "categoria": cell(col_categoria),
                                 "descripcion": cell(col_descripcion),
                             }
@@ -459,6 +499,7 @@ def extraer_data_dataframe(df, archivo="N/A"):
         headers,
         ["fecha", "fecha_emision", "fecha_de_emision", "date"],
     )
+    col_mes = buscar_columna(headers, ["mes", "month"])
 
     if col_monto is None or (col_cliente is None and col_producto is None):
         return data
@@ -481,7 +522,7 @@ def extraer_data_dataframe(df, archivo="N/A"):
                 "producto": cell(col_producto),
                 "monto": cell(col_monto, 0),
                 "fecha": cell(col_fecha),
-                "mes": "N/A",
+                "mes": cell(col_mes),
                 "categoria": cell(col_categoria),
                 "descripcion": cell(col_descripcion),
                 "archivo": archivo,
