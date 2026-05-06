@@ -1842,6 +1842,7 @@ async def chat(request: Request, pregunta: dict):
             "resumen_por_cliente": ultimo_resumen[:25],
             "insights": dashboard_insights[:10],
             "calidad": dashboard_calidad,
+            "contexto_negocio": dashboard.get("contextoNegocio", {}),
             "total_registros": len(ultimo_data),
         }
 
@@ -1860,6 +1861,10 @@ Reglas:
 - Si un dato no aparece, dilo claramente.
 - Responde en espanol profesional, breve y vendible.
 - Prioriza hallazgos, evidencia, riesgos/oportunidades y acciones concretas.
+- Si la pregunta del usuario no coincide con un boton rapido, responde directamente esa pregunta y no repitas una plantilla fija.
+- Usa los campos contexto_negocio, ventasPorMes, topClientes, crecimientoMensual y prediccionSiguienteMes cuando existan.
+- Cuando recomiendes una grafica, explica por que esa grafica ayuda y que decision permite tomar.
+- En modo auditor, separa observaciones de riesgo, evidencia y accion correctiva.
 - Si el usuario pide cambiar el dashboard, puedes responder normalmente y conservar cualquier JSON de control que venga en la pregunta.
 
 Formato recomendado cuando aplique:
@@ -1881,8 +1886,8 @@ Si calidad contiene duplicados, posible_fraude o errores_datos mayores a cero, m
                     ),
                 },
             ],
-            temperature=0.2,
-            max_tokens=900,
+            temperature=0.25,
+            max_tokens=1100,
         )
 
         return {"respuesta": resp.choices[0].message.content}
