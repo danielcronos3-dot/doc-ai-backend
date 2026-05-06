@@ -1433,6 +1433,152 @@ def crear_pdf_reporte(path, user_id, data, resumen, insights):
     doc.build(story, onFirstPage=dibujar_logo_pdf, onLaterPages=dibujar_logo_pdf)
 
 
+def normalizar_tipos_dashboard(tipos):
+    if isinstance(tipos, str):
+        tipos = [t.strip() for t in tipos.split(",") if t.strip()]
+
+    if not isinstance(tipos, list) or not tipos:
+        return ["barras"]
+
+    normalizados = []
+    for tipo in tipos:
+        tipo = str(tipo or "barras").strip().lower()
+        if tipo == "lineas":
+            tipo = "tendencia"
+        if tipo == "combinado":
+            normalizados.extend(["barras", "pastel", "dona", "ranking", "tendencia", "dispersion", "heatmap"])
+        else:
+            normalizados.append(tipo)
+
+    permitidos = {"barras", "pastel", "dona", "ranking", "tendencia", "dispersion", "heatmap"}
+    resultado = []
+    for tipo in normalizados:
+        if tipo in permitidos and tipo not in resultado:
+            resultado.append(tipo)
+
+    return resultado or ["barras"]
+
+
+def datos_meses(ultimo_data):
+    meses = {}
+    for item in ultimo_data:
+        mes = item.get("mes", "N/A")
+        if mes == "N/A":
+            mes = extraer_mes_fecha(item.get("fecha", "N/A"))
+        if not mes or mes == "N/A":
+            continue
+        monto = limpiar_numero(item.get("monto", 0))
+        meses[mes] = meses.get(mes, 0) + monto
+    return dict(sorted(meses.items()))
+
+
+def dibujar_dashboard_axis(ax, tipo, ultimo_data, ultimo_resumen):
+    clientes = [str(r.get("cliente", "N/A")) for r in ultimo_resumen]
+    totales = [limpiar_numero(r.get("total", 0)) for r in ultimo_resumen]
+    pares = sorted(zip(clientes, totales), key=lambda item: item[1], reverse=True)
+
+    if tipo == "pastel":
+        top = pares[:7]
+        otros = sum(v for _, v in pares[7:])
+        labels = [p[0] for p in top] + (["Otros"] if otros > 0 else [])
+        values = [p[1] for p in top] + ([otros] if otros > 0 else [])
+        ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
+        ax.set_title("Pastel por cliente")
+        ax.axis("equal")
+    elif tipo == "dona":
+        top = pares[:7]
+        otros = sum(v for _, v in pares[7:])
+        labels = [p[0] for p in top] + (["Otros"] if otros > 0 else [])
+        values = [p[1] for p in top] + ([otros] if otros > 0 else [])
+        ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90, wedgeprops={"width": 0.42})
+        ax.set_title("Dona por cliente")
+        ax.axis("equal")
+    elif tipo == "ranking":
+        top = pares[:12]
+        labels = [p[0] for p in top]
+        values = [p[1] for p in top]
+        ax.barh(labels[::-1], values[::-1], color="#F2C811")
+        ax.set_title("Ranking de clientes")
+        ax.set_xlabel("Monto")
+    elif tipo == "tendencia":
+        meses = datos_meses(ultimo_data)
+        if meses:
+            ax.plot(list(meses.keys()), list(meses.values()), marker="o", color="#00B7C3", linewidth=2.5)
+            ax.tick_params(axis="x", rotation=45)
+        ax.set_title("Tendencia por mes")
+        ax.set_ylabel("Monto")
+    elif tipo == "dispersion":
+        montos = [limpiar_numero(item.get("monto", 0)) for item in ultimo_data if limpiar_numero(item.get("monto", 0)) > 0]
+        ax.scatter(range(len(montos)), montos, color="#00B7C3", alpha=0.78, s=42)
+        ax.set_title("Dispersion de montos")
+        ax.set_xlabel("Registro")
+        ax.set_ylabel("Monto")
+    elif tipo == "heatmap":
+        pivot = {}
+        for item in ultimo_data:
+            cliente = str(item.get("cliente", "N/A"))[:22]
+            mes = item.get("mes", "N/A")
+            if mes == "N/A":
+                mes = extraer_mes_fecha(item.get("fecha", "N/A"))
+            if mes == "N/A":
+                continue
+            monto = limpiar_numero(item.get("monto", 0))
+            pivot[(cliente, mes)] = pivot.get((cliente, mes), 0) + monto
+
+        if pivot:
+            clientes_unicos = sorted(set(k[0] for k in pivot.keys()))[:14]
+            meses_unicos = sorted(set(k[1] for k in pivot.keys()))[:12]
+            matriz = [[pivot.get((cliente, mes), 0) for mes in meses_unicos] for cliente in clientes_unicos]
+            ax.imshow(matriz, aspect="auto", cmap="viridis")
+            ax.set_xticks(range(len(meses_unicos)))
+            ax.set_xticklabels(meses_unicos, rotation=45, ha="right")
+            ax.set_yticks(range(len(clientes_unicos)))
+            ax.set_yticklabels(clientes_unicos)
+        ax.set_title("Heatmap cliente/mes")
+    else:
+        top = pares[:18]
+        labels = [p[0] for p in top]
+        values = [p[1] for p in top]
+        ax.bar(labels, values, color="#F2C811")
+        ax.tick_params(axis="x", rotation=45)
+        ax.set_title("Barras por cliente")
+
+
+def crear_dashboard_compuesto_png(path, tipos, ultimo_data, ultimo_resumen):
+    tipos = normalizar_tipos_dashboard(tipos)
+    if not ultimo_resumen:
+        return False
+
+    columnas = 2 if len(tipos) > 1 else 1
+    filas = (len(tipos) + columnas - 1) // columnas
+    fig, axs = plt.subplots(filas, columnas, figsize=(8 * columnas, 5.2 * filas))
+
+    if not isinstance(axs, (list, tuple)):
+        try:
+            axs_flat = axs.flatten()
+        except Exception:
+            axs_flat = [axs]
+    else:
+        axs_flat = axs
+
+    try:
+        axs_flat = axs.flatten()
+    except Exception:
+        pass
+
+    for index, tipo in enumerate(tipos):
+        dibujar_dashboard_axis(axs_flat[index], tipo, ultimo_data, ultimo_resumen)
+
+    for index in range(len(tipos), len(axs_flat)):
+        axs_flat[index].axis("off")
+
+    fig.suptitle("NexaDash AI - dashboards seleccionados", fontsize=18, fontweight="bold")
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(path, dpi=160)
+    plt.close(fig)
+    return True
+
+
 def crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
     if not ultimo_resumen:
         return False
@@ -1498,13 +1644,8 @@ def crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
         plt.title("Ranking de clientes")
         plt.xlabel("Monto")
 
-    elif tipo == "lineas":
-        meses = {}
-        for item in ultimo_data:
-            mes = item.get("mes", "N/A")
-            monto = limpiar_numero(item.get("monto", 0))
-            meses[mes] = meses.get(mes, 0) + monto
-
+    elif tipo in ["lineas", "tendencia"]:
+        meses = datos_meses(ultimo_data)
         meses_keys = list(meses.keys())
         meses_vals = list(meses.values())
 
@@ -1563,7 +1704,13 @@ def dashboard(request: Request, tipo: str = "barras"):
     ultimo_data = sesion.get("ultimo_data", [])
 
     path = grafica_path(user_id)
-    if not crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
+    tipos = normalizar_tipos_dashboard(tipo)
+    if len(tipos) > 1:
+        ok = crear_dashboard_compuesto_png(path, tipos, ultimo_data, ultimo_resumen)
+    else:
+        ok = crear_dashboard_png(path, tipos[0], ultimo_data, ultimo_resumen)
+
+    if not ok:
         return {"error": "No hay datos"}
 
     return FileResponse(path, media_type="image/png", filename="dashboard.png")
@@ -1581,9 +1728,16 @@ async def dashboard_desde_datos(request: Request, tipo: str = "barras"):
     dashboard_payload = payload.get("dashboard", payload)
     ultimo_data = dashboard_payload.get("data", [])
     ultimo_resumen = dashboard_payload.get("resumen", [])
+    tipos = dashboard_payload.get("tipos", payload.get("tipos", tipo))
 
     path = grafica_path(user_id)
-    if not crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
+    tipos_normalizados = normalizar_tipos_dashboard(tipos)
+    if len(tipos_normalizados) > 1:
+        ok = crear_dashboard_compuesto_png(path, tipos_normalizados, ultimo_data, ultimo_resumen)
+    else:
+        ok = crear_dashboard_png(path, tipos_normalizados[0], ultimo_data, ultimo_resumen)
+
+    if not ok:
         return {"error": "No hay datos"}
 
     return FileResponse(path, media_type="image/png", filename="dashboard.png")
