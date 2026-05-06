@@ -1482,7 +1482,15 @@ def dibujar_dashboard_axis(ax, tipo, ultimo_data, ultimo_resumen):
         otros = sum(v for _, v in pares[7:])
         labels = [p[0] for p in top] + (["Otros"] if otros > 0 else [])
         values = [p[1] for p in top] + ([otros] if otros > 0 else [])
-        ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
+        ax.pie(
+            values,
+            labels=labels,
+            autopct="%1.1f%%",
+            startangle=90,
+            pctdistance=0.75,
+            labeldistance=1.08,
+            wedgeprops={"linewidth": 1, "edgecolor": "white"},
+        )
         ax.set_title("Pastel por cliente")
         ax.axis("equal")
     elif tipo == "dona":
@@ -1490,7 +1498,16 @@ def dibujar_dashboard_axis(ax, tipo, ultimo_data, ultimo_resumen):
         otros = sum(v for _, v in pares[7:])
         labels = [p[0] for p in top] + (["Otros"] if otros > 0 else [])
         values = [p[1] for p in top] + ([otros] if otros > 0 else [])
-        ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90, wedgeprops={"width": 0.42})
+        ax.pie(
+            values,
+            labels=labels,
+            autopct="%1.1f%%",
+            startangle=90,
+            pctdistance=0.78,
+            labeldistance=1.08,
+            wedgeprops={"width": 0.42, "linewidth": 1, "edgecolor": "white"},
+        )
+        ax.text(0, 0, "Total\nclientes", ha="center", va="center", fontsize=9, fontweight="bold")
         ax.set_title("Dona por cliente")
         ax.axis("equal")
     elif tipo == "ranking":
@@ -1626,14 +1643,28 @@ def crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
     plt.figure(figsize=(10, 5))
 
     if tipo == "pastel":
-        plt.pie(totales, labels=clientes, autopct="%1.1f%%", startangle=90)
+        plt.pie(
+            totales,
+            labels=clientes,
+            autopct="%1.1f%%",
+            startangle=90,
+            pctdistance=0.75,
+            labeldistance=1.08,
+            wedgeprops={"linewidth": 1, "edgecolor": "white"},
+        )
         plt.axis("equal")
 
     elif tipo == "dona":
-        plt.pie(totales, labels=clientes, autopct="%1.1f%%", startangle=90)
-        centro = plt.Circle((0, 0), 0.55, fc="white")
-        fig = plt.gcf()
-        fig.gca().add_artist(centro)
+        plt.pie(
+            totales,
+            labels=clientes,
+            autopct="%1.1f%%",
+            startangle=90,
+            pctdistance=0.78,
+            labeldistance=1.08,
+            wedgeprops={"width": 0.42, "linewidth": 1, "edgecolor": "white"},
+        )
+        plt.text(0, 0, "Total\nclientes", ha="center", va="center", fontsize=9, fontweight="bold")
         plt.axis("equal")
 
     elif tipo == "ranking":
