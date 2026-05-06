@@ -19,6 +19,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pdfplumber
 from PIL import Image
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+from openpyxl.worksheet.table import Table as ExcelTable, TableStyleInfo
+from openpyxl.utils import get_column_letter
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_RIGHT
@@ -33,7 +37,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-6"
+APP_VERSION = "pdf-table-extractor-2026-05-05-7"
 
 app = FastAPI()
 
@@ -827,6 +831,117 @@ def generar_calidad_datos(data, resumen):
     }
 
 
+def crear_excel_reporte(path, data, resumen, insights, calidad):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Dashboard"
+
+    dark = "10172A"
+    yellow = "F2C811"
+    border_color = "CBD5E1"
+    thin = Side(style="thin", color=border_color)
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def style_header(row):
+        for cell in row:
+            cell.fill = PatternFill("solid", fgColor=dark)
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = border
+
+    ws["A1"] = "NexaDash AI"
+    ws["A1"].font = Font(size=20, bold=True, color=dark)
+    ws["A2"] = "Reporte ejecutivo generado automaticamente"
+    ws["A2"].font = Font(size=10, color="64748B")
+
+    total = sum(limpiar_numero(item.get("total", 0)) for item in resumen)
+    score = max(
+        0,
+        100
+        - int(calidad.get("duplicados", 0)) * 8
+        - int(calidad.get("errores_datos", 0)) * 2
+        - int(calidad.get("posible_fraude", 0)) * 6,
+    )
+    kpis = [
+        ("Monto total", total),
+        ("Clientes", len(resumen)),
+        ("Registros", len(data)),
+        ("Score auditor", f"{score}%"),
+    ]
+    for idx, (label, value) in enumerate(kpis, start=1):
+        col = (idx - 1) * 2 + 1
+        ws.cell(row=4, column=col, value=label)
+        ws.cell(row=5, column=col, value=value)
+        ws.cell(row=4, column=col).fill = PatternFill("solid", fgColor=yellow)
+        ws.cell(row=4, column=col).font = Font(bold=True, color=dark)
+        ws.cell(row=5, column=col).font = Font(bold=True, size=14, color=dark)
+        ws.cell(row=4, column=col).border = border
+        ws.cell(row=5, column=col).border = border
+        if label == "Monto total":
+            ws.cell(row=5, column=col).number_format = '"$"#,##0.00'
+
+    ws.append([])
+    ws.append(["Cliente", "Total"])
+    style_header(ws[7])
+    for item in sorted(resumen, key=lambda x: limpiar_numero(x.get("total", 0)), reverse=True):
+        ws.append([item.get("cliente", "N/A"), limpiar_numero(item.get("total", 0))])
+        ws.cell(row=ws.max_row, column=2).number_format = '"$"#,##0.00'
+
+    if ws.max_row >= 8:
+        table = ExcelTable(displayName="ResumenClientes", ref=f"A7:B{ws.max_row}")
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium9",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        ws.add_table(table)
+
+    ws_data = wb.create_sheet("Datos")
+    headers = ["Archivo", "Cliente", "Producto", "Monto", "Fecha", "Mes", "Categoria", "Descripcion"]
+    ws_data.append(headers)
+    style_header(ws_data[1])
+    for item in data:
+        ws_data.append([
+            item.get("archivo", "N/A"),
+            item.get("cliente", "N/A"),
+            item.get("producto", "N/A"),
+            limpiar_numero(item.get("monto", 0)),
+            item.get("fecha", "N/A"),
+            item.get("mes", "N/A"),
+            item.get("categoria", "N/A"),
+            item.get("descripcion", "N/A"),
+        ])
+        ws_data.cell(row=ws_data.max_row, column=4).number_format = '"$"#,##0.00'
+
+    if ws_data.max_row >= 2:
+        table = ExcelTable(displayName="DetalleDatos", ref=f"A1:H{ws_data.max_row}")
+        table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium4", showRowStripes=True)
+        ws_data.add_table(table)
+
+    ws_insights = wb.create_sheet("Insights")
+    ws_insights.append(["Tipo", "Detalle"])
+    style_header(ws_insights[1])
+    for item in insights:
+        ws_insights.append(["Insight", item])
+    for item in calidad.get("advertencias", []):
+        ws_insights.append(["Auditoria", item])
+
+    for sheet in wb.worksheets:
+        sheet.freeze_panes = "A2"
+        for row in sheet.iter_rows():
+            for cell in row:
+                cell.border = border
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+        for column_cells in sheet.columns:
+            letter = get_column_letter(column_cells[0].column)
+            max_len = max(len(str(cell.value or "")) for cell in column_cells)
+            sheet.column_dimensions[letter].width = min(max(max_len + 3, 12), 42)
+
+    wb.save(path)
+
+
 @app.post("/upload")
 async def upload(
     request: Request,
@@ -1078,13 +1193,11 @@ Reglas estrictas:
         sesion["ultimo_data"] = data
         sesion["ultimo_resumen"] = resumen_lista
 
-        df = pd.DataFrame(data)
-        df.to_excel(reporte_path(user_id), index=False)
-
         log(rid, f"registros: {len(data)}")
         log(rid, f"total {round(time.time() - start, 2)}s")
         insights = generar_insights(data, resumen_lista)
         calidad = generar_calidad_datos(data, resumen_lista)
+        crear_excel_reporte(reporte_path(user_id), data, resumen_lista, insights, calidad)
         sesion["ultimo_insights"] = insights
 
         return {
