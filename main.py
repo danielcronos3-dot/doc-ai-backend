@@ -33,9 +33,25 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-5"
+APP_VERSION = "pdf-table-extractor-2026-05-05-6"
 
 app = FastAPI()
+
+MESES_NOMBRES = {
+    "enero": "01",
+    "febrero": "02",
+    "marzo": "03",
+    "abril": "04",
+    "mayo": "05",
+    "junio": "06",
+    "julio": "07",
+    "agosto": "08",
+    "septiembre": "09",
+    "setiembre": "09",
+    "octubre": "10",
+    "noviembre": "11",
+    "diciembre": "12",
+}
 
 app.add_middleware(
     CORSMiddleware,
@@ -182,26 +198,10 @@ def normalizar_mes_texto(mes, fecha="N/A"):
         .encode("ascii", "ignore")
         .decode("ascii")
     )
-    meses = {
-        "enero": "01",
-        "febrero": "02",
-        "marzo": "03",
-        "abril": "04",
-        "mayo": "05",
-        "junio": "06",
-        "julio": "07",
-        "agosto": "08",
-        "septiembre": "09",
-        "setiembre": "09",
-        "octubre": "10",
-        "noviembre": "11",
-        "diciembre": "12",
-    }
-
-    if normal in meses:
+    if normal in MESES_NOMBRES:
         mes_fecha = extraer_mes_fecha(fecha)
         if mes_fecha != "N/A":
-            return f"{mes_fecha[:4]}-{meses[normal]}"
+            return f"{mes_fecha[:4]}-{MESES_NOMBRES[normal]}"
         return texto[:1].upper() + texto[1:]
 
     if re.match(r"^(0?[1-9]|1[0-2])$", texto):
@@ -210,6 +210,29 @@ def normalizar_mes_texto(mes, fecha="N/A"):
             return f"{mes_fecha[:4]}-{texto.zfill(2)}"
 
     return texto
+
+
+def texto_normalizado_ascii(value):
+    return (
+        unicodedata.normalize("NFKD", str(value or "").strip().lower())
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+
+
+def separar_mes_de_cliente(cliente, mes):
+    texto = str(cliente or "").strip()
+    normal = texto_normalizado_ascii(texto)
+    if normal in MESES_NOMBRES:
+        return "N/A", normalizar_mes_texto(texto, "N/A")
+
+    match = re.match(r"^(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s+(.+)$", normal)
+    if match:
+        mes_detectado = normalizar_mes_texto(match.group(1), "N/A")
+        cliente_limpio = texto.split(maxsplit=1)[1].strip() if " " in texto else "N/A"
+        return cliente_limpio or "N/A", mes if mes != "N/A" else mes_detectado
+
+    return texto or "N/A", mes
 
 
 def normalizar_item(item):
@@ -222,6 +245,7 @@ def normalizar_item(item):
     archivo = str(item.get("archivo", "N/A") or "N/A").strip()
     monto = limpiar_numero(item.get("monto", 0))
 
+    cliente, mes = separar_mes_de_cliente(cliente, mes)
     mes = normalizar_mes_texto(mes, fecha)
 
     return {
@@ -258,14 +282,14 @@ def item_valido(item):
         "",
     }
 
-    cliente = str(item.get("cliente", "")).strip().lower()
+    cliente = texto_normalizado_ascii(item.get("cliente", ""))
     producto = str(item.get("producto", "")).strip().lower()
     monto = limpiar_numero(item.get("monto", 0))
 
     if monto <= 0:
         return False
 
-    if cliente in basura:
+    if cliente in basura or cliente in MESES_NOMBRES:
         item["cliente"] = "N/A"
 
     if producto in basura:
