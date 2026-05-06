@@ -15,6 +15,11 @@ import unicodedata
 import uuid
 import fitz
 
+try:
+    import redis
+except Exception:
+    redis = None
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import pdfplumber
@@ -37,7 +42,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-8"
+APP_VERSION = "redis-dashboard-metrics-2026-05-05-1"
 
 app = FastAPI()
 
@@ -66,6 +71,18 @@ app.add_middleware(
 )
 
 sesiones = {}
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
+redis_client = None
+
+if REDIS_URL and redis is not None:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client.ping()
+        print("[REDIS] Sesiones persistentes activas")
+    except Exception as e:
+        print(f"[REDIS] No disponible, usando memoria local: {e}")
+        redis_client = None
 
 
 
@@ -98,15 +115,49 @@ def get_user_id(request):
     return user_id
 
 
+def sesion_vacia():
+    return {
+        "textos": [],
+        "data_preextraida": [],
+        "ultimo_data": [],
+        "ultimo_resumen": [],
+        "ultimo_insights": [],
+        "estado_analisis": "sin_archivos",
+    }
+
+
+def redis_session_key(user_id):
+    return f"nexadash:session:{limpiar_user_id(user_id)}"
+
+
+def guardar_sesion(user_id, sesion):
+    if redis_client is not None:
+        try:
+            redis_client.setex(
+                redis_session_key(user_id),
+                SESSION_TTL_SECONDS,
+                json.dumps(sesion, ensure_ascii=False, default=str),
+            )
+            return
+        except Exception as e:
+            log("REDIS", f"ERROR guardando sesion: {e}")
+
+    sesiones[user_id] = sesion
+
+
 def get_sesion(user_id):
+    if redis_client is not None:
+        try:
+            raw = redis_client.get(redis_session_key(user_id))
+            if raw:
+                sesion = json.loads(raw)
+                sesiones[user_id] = sesion
+                return sesion
+        except Exception as e:
+            log("REDIS", f"ERROR leyendo sesion: {e}")
+
     if user_id not in sesiones:
-        sesiones[user_id] = {
-            "textos": [],
-            "data_preextraida": [],
-            "ultimo_data": [],
-            "ultimo_resumen": [],
-            "ultimo_insights": [],
-        }
+        sesiones[user_id] = sesion_vacia()
 
     return sesiones[user_id]
 
@@ -128,6 +179,7 @@ def root():
     return {
         "status": "ok",
         "sesiones": len(sesiones),
+        "redis": redis_client is not None,
         "vision_model": VISION_MODEL,
         "extract_model": EXTRACT_MODEL,
         "chat_model": CHAT_MODEL,
@@ -141,13 +193,7 @@ def root():
 async def reset(request: Request):
     user_id = get_user_id(request)
 
-    sesiones[user_id] = {
-        "textos": [],
-        "data_preextraida": [],
-        "ultimo_data": [],
-        "ultimo_resumen": [],
-        "ultimo_insights": [],
-    }
+    guardar_sesion(user_id, sesion_vacia())
 
     for archivo in [reporte_path(user_id), grafica_path(user_id), pdf_path(user_id)]:
         if os.path.exists(archivo):
@@ -961,6 +1007,7 @@ async def upload(
         sesion["ultimo_data"] = []
         sesion["ultimo_resumen"] = []
         sesion["ultimo_insights"] = []
+        sesion["estado_analisis"] = "sin_analizar"
         log(rid, f"user {user_id} memoria anterior eliminada antes de subir")
 
     try:
@@ -1024,11 +1071,14 @@ async def upload(
         log(rid, f"user {user_id} archivos en memoria: {len(sesion['textos'])}")
 
         log(rid, f"total {round(time.time() - start, 2)}s")
+        sesion["estado_analisis"] = "pendiente"
+        guardar_sesion(user_id, sesion)
 
         return {
             "mensaje": "OK",
             "archivos_subidos": len(files),
             "archivos_en_memoria": len(sesion["textos"]),
+            "estado_analisis": sesion["estado_analisis"],
             "previews": previews,
         }
 
@@ -1060,6 +1110,8 @@ async def analizar(request: Request):
     start = time.time()
     user_id = get_user_id(request)
     sesion = get_sesion(user_id)
+    sesion["estado_analisis"] = "procesando"
+    guardar_sesion(user_id, sesion)
     textos = sesion["textos"]
 
     try:
@@ -1199,15 +1251,20 @@ Reglas estrictas:
         calidad = generar_calidad_datos(data, resumen_lista)
         crear_excel_reporte(reporte_path(user_id), data, resumen_lista, insights, calidad)
         sesion["ultimo_insights"] = insights
+        sesion["estado_analisis"] = "completado"
+        guardar_sesion(user_id, sesion)
 
         return {
             "data": data,
             "resumen": resumen_lista,
             "insights": insights,
             "calidad": calidad,
+            "estado_analisis": sesion["estado_analisis"],
         }
     except Exception as e:
         log(rid, f"ERROR ANALIZAR: {e}")
+        sesion["estado_analisis"] = "error"
+        guardar_sesion(user_id, sesion)
         return {"data": [], "resumen": [], "error": str(e)}
 
 
