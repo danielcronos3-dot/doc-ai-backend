@@ -74,13 +74,17 @@ sesiones = {}
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 redis_client = None
+redis_error = ""
 
-if REDIS_URL and redis is not None:
+if REDIS_URL and redis is None:
+    redis_error = "El paquete redis no se pudo importar"
+elif REDIS_URL and redis is not None:
     try:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
         print("[REDIS] Sesiones persistentes activas")
     except Exception as e:
+        redis_error = str(e)
         print(f"[REDIS] No disponible, usando memoria local: {e}")
         redis_client = None
 
@@ -180,6 +184,8 @@ def root():
         "status": "ok",
         "sesiones": len(sesiones),
         "redis": redis_client is not None,
+        "redis_url_configured": bool(REDIS_URL),
+        "redis_error": redis_error,
         "vision_model": VISION_MODEL,
         "extract_model": EXTRACT_MODEL,
         "chat_model": CHAT_MODEL,
@@ -1427,21 +1433,15 @@ def crear_pdf_reporte(path, user_id, data, resumen, insights):
     doc.build(story, onFirstPage=dibujar_logo_pdf, onLaterPages=dibujar_logo_pdf)
 
 
-@app.get("/descargar-dashboard")
-def dashboard(request: Request, tipo: str = "barras"):
-    user_id = get_user_id(request)
-    sesion = get_sesion(user_id)
-
-    ultimo_resumen = sesion["ultimo_resumen"]
-    ultimo_data = sesion["ultimo_data"]
-
+def crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
     if not ultimo_resumen:
-        return {"error": "No hay datos"}
+        return False
 
-    clientes = [r["cliente"] for r in ultimo_resumen]
-    totales = [r["total"] for r in ultimo_resumen]
-    path = grafica_path(user_id)
+    clientes = [str(r.get("cliente", "N/A")) for r in ultimo_resumen]
+    totales = [limpiar_numero(r.get("total", 0)) for r in ultimo_resumen]
 
+    if not clientes or not any(totales):
+        return False
 
     if tipo == "combinado":
         fig, axs = plt.subplots(2, 2, figsize=(14, 10))
@@ -1475,7 +1475,7 @@ def dashboard(request: Request, tipo: str = "barras"):
         plt.savefig(path)
         plt.close()
 
-        return FileResponse(path, media_type="image/png", filename="dashboard.png")
+        return True
 
     plt.figure(figsize=(10, 5))
 
@@ -1550,6 +1550,41 @@ def dashboard(request: Request, tipo: str = "barras"):
     plt.tight_layout()
     plt.savefig(path)
     plt.close()
+
+    return True
+
+
+@app.get("/descargar-dashboard")
+def dashboard(request: Request, tipo: str = "barras"):
+    user_id = get_user_id(request)
+    sesion = get_sesion(user_id)
+
+    ultimo_resumen = sesion.get("ultimo_resumen", [])
+    ultimo_data = sesion.get("ultimo_data", [])
+
+    path = grafica_path(user_id)
+    if not crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
+        return {"error": "No hay datos"}
+
+    return FileResponse(path, media_type="image/png", filename="dashboard.png")
+
+
+@app.post("/descargar-dashboard")
+async def dashboard_desde_datos(request: Request, tipo: str = "barras"):
+    user_id = get_user_id(request)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    dashboard_payload = payload.get("dashboard", payload)
+    ultimo_data = dashboard_payload.get("data", [])
+    ultimo_resumen = dashboard_payload.get("resumen", [])
+
+    path = grafica_path(user_id)
+    if not crear_dashboard_png(path, tipo, ultimo_data, ultimo_resumen):
+        return {"error": "No hay datos"}
 
     return FileResponse(path, media_type="image/png", filename="dashboard.png")
 
