@@ -37,7 +37,7 @@ load_dotenv()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EXTRACT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CHAT_MODEL = "llama-3.1-8b-instant"
-APP_VERSION = "pdf-table-extractor-2026-05-05-7"
+APP_VERSION = "pdf-table-extractor-2026-05-05-8"
 
 app = FastAPI()
 
@@ -1432,6 +1432,14 @@ def dashboard(request: Request, tipo: str = "barras"):
         fig = plt.gcf()
         fig.gca().add_artist(centro)
         plt.axis("equal")
+
+    elif tipo == "ranking":
+        pares = sorted(zip(clientes, totales), key=lambda item: item[1], reverse=True)[:15]
+        labels = [p[0] for p in pares]
+        values = [p[1] for p in pares]
+        plt.barh(labels[::-1], values[::-1], color="#F2C811")
+        plt.title("Ranking de clientes")
+        plt.xlabel("Monto")
 
     elif tipo == "lineas":
         meses = {}
